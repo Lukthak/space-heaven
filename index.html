@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>SpaceHeaven</title>
+    <link rel="stylesheet" href="style.css?v=emergency-help-3" />
+    <style>
+      .radio-panel { box-sizing: border-box; width: 100%; max-height: 54vh; overflow-y: auto; padding: 12px; color: #7dffa2; background: #020804; border: 1px solid #14522c; font-family: inherit; font-size: 13px; }
+      .radio-panel * { font-size: 13px !important; }
+      .radio-intro, .radio-status { margin: 4px 0 10px; color: #9cffb7; }
+      .radio-stations-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 7px; margin-bottom: 14px; }
+      .radio-station-row { display: flex; min-width: 0; gap: 4px; }
+      .radio-station-button, .radio-remove-button, .radio-add-button { border: 1px solid #238844; border-radius: 0; color: #7dffa2; background: #06130a; font: inherit; cursor: pointer; }
+      .radio-station-button { flex: 1; min-width: 0; padding: 8px; text-align: left; }
+      .radio-station-button:hover, .radio-remove-button:hover, .radio-add-button:hover { background: #10351b; }
+      .radio-remove-button { width: 34px; }
+      .radio-audio { display: block; width: 100%; margin: 8px 0; }
+      .radio-add-form { display: grid; grid-template-columns: 1fr 2fr auto; align-items: end; gap: 8px; padding-top: 10px; border-top: 1px solid #14522c; }
+      .radio-field { display: grid; gap: 4px; color: #6ee98f; }
+      .radio-field input { box-sizing: border-box; width: 100%; min-width: 0; padding: 7px; border: 1px solid #14522c; border-radius: 0; color: #a5ffbd; background: #000; font: inherit; }
+      .radio-add-button { min-height: 34px; padding: 6px 10px; }
+      @media (max-width: 620px) { .radio-add-form { grid-template-columns: 1fr; } }
+    </style>
+  </head>
+  <body>
+    <main class="game-shell">
+      <canvas id="gameCanvas" width="800" height="800" aria-label="Mundo de SpaceHeaven"></canvas>
+      <div id="multiplayerStatus" class="multiplayer-status" aria-live="polite" hidden></div>
+      <div id="fuelEmergencyNotice" class="fuel-emergency-notice" role="alert" hidden>¡SIN COMBUSTIBLE! Abre el inventario y entra en ¡Ayuda!</div>
+      <div id="message" class="message" role="status" aria-live="polite"></div>
+      <div id="shipAbilities" class="ship-abilities" aria-label="Habilidades de la nave" hidden>
+        <div class="ship-ability" data-ship-part="tip" data-shortcut="1" aria-label="1: Punta">
+          <img class="ship-ability-icon" alt="Punta equipada" />
+          <span id="tipCooldown" class="ship-ability-cooldown" aria-hidden="true" hidden></span>
+        </div>
+        <div class="ship-ability" data-ship-part="center" data-shortcut="2" aria-label="2: Centro">
+          <img class="ship-ability-icon" alt="Centro equipado" />
+          <span id="centerCooldown" class="ship-ability-cooldown" aria-hidden="true" hidden></span>
+        </div>
+        <div class="ship-ability" data-ship-part="propulsor" data-shortcut="3" aria-label="3: Propulsor">
+          <img class="ship-ability-icon" alt="Propulsor equipado" />
+          <span id="propulsorCooldown" class="ship-ability-cooldown" aria-hidden="true" hidden></span>
+        </div>
+      </div>
+      <div id="surfaceAbilities" class="ship-abilities surface-abilities" aria-label="Objetos utilizables" hidden>
+        <button class="ship-ability surface-ability" type="button" data-surface-slot="0" aria-label="Espacio vacío" title="">
+          <img class="ship-ability-icon" alt="" hidden />
+        </button>
+        <button class="ship-ability surface-ability" type="button" data-surface-slot="1" aria-label="Espacio vacío" title="">
+          <img class="ship-ability-icon" alt="" hidden />
+        </button>
+        <button class="ship-ability surface-ability" type="button" data-surface-slot="2" aria-label="Espacio vacío" title="">
+          <img class="ship-ability-icon" alt="" hidden />
+        </button>
+      </div>
+      <form id="chatComposer" class="chat-composer" autocomplete="off" hidden>
+        <input id="chatInput" class="chat-input" type="text" maxlength="180" aria-label="Mensaje de chat" />
+      </form>
+
+      <section
+        id="inventoryPanel"
+        class="inventory-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="inventoryTitle"
+        hidden
+      >
+        <header class="inventory-titlebar">
+          <h1 id="inventoryTitle">Inventario</h1>
+          <button id="closeInventoryBtn" class="close-button" type="button" aria-label="Cerrar inventario">×</button>
+        </header>
+
+        <div class="inventory-screen">
+          <nav id="inventoryOptions" class="inventory-options" aria-label="Opciones del menú">
+            <button class="inventory-option" type="button" data-command="objetos" aria-pressed="false">1. Objetos</button>
+            <button class="inventory-option" type="button" data-command="mapa" aria-pressed="false">2. Mapa</button>
+            <button class="inventory-option" type="button" data-command="nave" aria-pressed="false">3. Nave</button>
+            <button class="inventory-option" type="button" data-command="radio" aria-pressed="false">4. Radio</button>
+            <button class="inventory-option" type="button" data-command="misiones" aria-pressed="false">5. Misiones</button>
+            <button id="emergencyHelpOption" class="inventory-option emergency-help-option" type="button" data-command="help" aria-pressed="false" hidden>¡Ayuda!</button>
+          </nav>
+
+          <div id="inventoryItemsGrid" class="inventory-items-grid" role="grid" aria-label="Inventario de objetos" hidden></div>
+          <section id="missionPanel" class="mission-panel" aria-label="Misiones" hidden>
+            <p class="mission-intro">Misiones activas y disponibles</p>
+            <div id="missionsList" class="missions-list" aria-live="polite"></div>
+          </section>
+          <section id="radioPanel" class="radio-panel" aria-label="Radio en línea" hidden>
+            <p class="radio-intro">Elige una emisora en directo o agrega un enlace de streaming.</p>
+            <div id="radioStationsList" class="radio-stations-list" aria-label="Emisoras disponibles"></div>
+            <audio id="radioAudio" class="radio-audio" controls preload="none" aria-label="Reproductor de radio"></audio>
+            <p id="radioStatus" class="radio-status" role="status" aria-live="polite">Selecciona una emisora para escucharla.</p>
+            <form id="radioAddForm" class="radio-add-form">
+              <label class="radio-field" for="radioStationName">Nombre
+                <input id="radioStationName" name="name" type="text" maxlength="48" required autocomplete="off" placeholder="Mi emisora" />
+              </label>
+              <label class="radio-field" for="radioStationUrl">Enlace directo del stream
+                <input id="radioStationUrl" name="url" type="url" maxlength="500" required placeholder="https://..." />
+              </label>
+              <button class="radio-add-button" type="submit">Agregar emisora</button>
+            </form>
+          </section>
+          <section id="emergencyHelpPanel" class="emergency-help-panel" aria-label="Ayuda de emergencia" hidden>
+            <p class="emergency-help-intro">Te quedaste sin propulsión. Elige cómo quieres continuar:</p>
+            <button class="emergency-help-action" type="button" data-emergency-action="capsule">1. Cápsula de escape <span>Activar la segunda cápsula. Conservas los primeros 3 espacios del inventario.</span></button>
+            <button class="emergency-help-action" type="button" data-emergency-action="delivery">2. Combustible express <span>Una nave trae 3 stacks del recurso que usa tu propulsor (combustible o energía). Coste: 1.000 créditos.</span></button>
+            <button class="emergency-help-action" type="button" data-emergency-action="tow">3. Remolque a Tierra <span>Una nave viene a buscarte y te lleva de vuelta. Coste: <strong id="emergencyTowCost">500 créditos</strong> (desde la Luna; aumenta con la distancia).</span></button>
+            <p id="emergencyHelpStatus" class="emergency-help-status" aria-live="polite"></p>
+            <button id="cancelEmergencyService" class="market-tab emergency-cancel" type="button" hidden>Cancelar solicitud</button>
+          </section>
+          <section id="chestPanel" class="chest-panel" aria-label="Cofre de Tierra" hidden>
+            <p class="chest-instructions">Arrastra objetos entre las dos áreas para depositarlos o retirarlos.</p>
+            <div class="chest-transfer-layout">
+              <div class="chest-column">
+                <h2 class="chest-column-title">Tu inventario</h2>
+                <div id="chestPlayerItemsGrid" class="inventory-items-grid chest-items-grid" role="grid" aria-label="Tu inventario para guardar"></div>
+              </div>
+              <div class="chest-column">
+                <h2 class="chest-column-title">Cofre</h2>
+                <div id="chestItemsGrid" class="inventory-items-grid chest-items-grid" role="grid" aria-label="Objetos guardados en el cofre"></div>
+              </div>
+            </div>
+          </section>
+          <section id="marketPanel" class="market-panel" aria-label="Tienda del comerciante" hidden>
+            <p class="market-intro">Comerciante de Tierra</p>
+            <p class="market-inventory" id="marketInventory"></p>
+            <nav class="market-tabs" aria-label="Inventarios del comercio">
+              <button class="market-tab" type="button" data-market-view="merchant" aria-pressed="true">
+                Comerciante
+              </button>
+              <button class="market-tab" type="button" data-market-view="player" aria-pressed="false">
+                Mi inventario
+              </button>
+            </nav>
+            <p class="market-status" id="marketStatus" aria-live="polite"></p>
+            <div id="merchantItemsGrid" class="market-items-grid inventory-items-grid" role="grid" aria-label="Objetos del comerciante"></div>
+            <div id="marketPlayerItemsGrid" class="market-items-grid inventory-items-grid" role="grid" aria-label="Mi inventario para vender" hidden></div>
+          </section>
+          <section id="shipWorkshop" class="ship-workshop" aria-label="Modificación de la nave" hidden>
+            <div class="ship-preview">
+              <canvas id="shipPreviewCanvas" width="160" height="160" aria-label="Vista previa de la nave equipada"></canvas>
+              <p id="shipStats" class="ship-stats" aria-live="polite"></p>
+            </div>
+            <div id="shipPartsList" class="ship-parts-list"></div>
+          </section>
+          <section id="repairPanel" class="repair-panel" aria-label="Reparación de piezas" hidden>
+            <p class="repair-intro">Selecciona las piezas dañadas que quieras reparar. El precio depende del valor y del daño de cada pieza.</p>
+            <div id="repairOptions" class="repair-options"></div>
+            <p id="repairStatus" class="repair-status" aria-live="polite"></p>
+            <div class="repair-actions">
+              <button id="repairSelectedButton" class="market-tab" type="button">Reparar seleccionadas</button>
+              <button id="repairAllButton" class="market-tab" type="button">Reparar todo</button>
+            </div>
+          </section>
+          <div id="inventoryMapContainer" class="inventory-map-container" hidden>
+            <canvas id="inventoryMap" class="inventory-map" width="900" height="440" aria-label="Mapa cercano de soles y planetas"></canvas>
+            <span id="inventoryMapTooltip" class="inventory-map-tooltip" role="status" hidden></span>
+          </div>
+        </div>
+        <div class="credits-counter" aria-label="Créditos">
+          <span id="credits">150</span> $
+        </div>
+      </section>
+    </main>
+
+    <div id="inventoryTooltip" class="inventory-tooltip" role="tooltip" hidden></div>
+    <script src="app.js?v=hoverboard-weapons-4"></script>
+  </body>
+</html>
