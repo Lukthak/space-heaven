@@ -102,7 +102,7 @@ let playerChatMessage = '';
 let playerChatMessageUntil = 0;
 const AUTH_SESSION_KEY = 'spaceHeavenAccountSession';
 let authSession = null;
-try { authSession = JSON.parse(sessionStorage.getItem(AUTH_SESSION_KEY) || 'null'); } catch { authSession = null; }
+try { authSession = JSON.parse(localStorage.getItem(AUTH_SESSION_KEY) || 'null'); } catch { authSession = null; }
 const authGate = document.getElementById('authGate');
 const authForm = document.getElementById('authForm');
 const authTitle = document.getElementById('authTitle');
@@ -175,7 +175,7 @@ async function authenticate(mode, values) {
   const result = await response.json();
   if (!response.ok) throw new Error(result.error || 'No se pudo iniciar sesión.');
   authSession = result;
-  sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
+  localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
   multiplayerPlayerId = result.user.id;
   multiplayerName = result.user.username;
   accountReady = true;
@@ -220,7 +220,7 @@ async function restoreAccountSession() {
       authSession.user = result.user;
       multiplayerPlayerId = result.user.id;
       multiplayerName = result.user.username;
-      sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
+      localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
       accountReady = true;
       authGate.hidden = true;
       GAME_SAVE_KEY = `spaceheaven-save-v1-${result.user.id}`;
@@ -228,7 +228,7 @@ async function restoreAccountSession() {
       return;
     } catch {
       authSession = null;
-      sessionStorage.removeItem(AUTH_SESSION_KEY);
+      localStorage.removeItem(AUTH_SESSION_KEY);
     }
   }
   setAuthMode(false);
