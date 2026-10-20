@@ -85,6 +85,11 @@ def authenticated_user(handler) -> dict | None:
         return next((a for a in ACCOUNTS["accounts"] if a["id"] == session.get("user_id")), None)
 
 
+def public_player_snapshot(snapshot: dict) -> dict:
+    # Estos datos de estado compartido se envían una sola vez en `worlds`, no dentro de cada jugador.
+    return {key: value for key, value in snapshot.items() if key not in ("surfaceWorld", "collectedPickupIds")}
+
+
 def prune_stale_players(now: float) -> None:
     stale_ids = [
         player_id for player_id, entry in PLAYERS.items()
@@ -157,7 +162,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
         with STATE_LOCK:
             prune_stale_players(now)
             players = [
-                entry["snapshot"] for player_id, entry in PLAYERS.items()
+                public_player_snapshot(entry["snapshot"]) for player_id, entry in PLAYERS.items()
                 if player_id != self_id
             ]
             result = {
@@ -244,7 +249,14 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                     owner_id = player_id
                 if owner_id == player_id:
                     WORLDS[planet] = surface_world
-        self.send_json(200, {"ok": True})
+            visible_worlds = {planet: WORLDS[planet]} if planet in WORLDS else {}
+            result = {
+                "ok": True,
+                "players": [public_player_snapshot(entry["snapshot"]) for peer_id, entry in PLAYERS.items() if peer_id != player_id],
+                "worldOwners": dict(WORLD_OWNERS),
+                "worlds": visible_worlds,
+            }
+        self.send_json(200, result)
 
 
 if __name__ == "__main__":
