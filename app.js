@@ -100,7 +100,24 @@ let earthWandererDialogText = '';
 let earthWandererTipIndex = 0;
 let playerChatMessage = '';
 let playerChatMessageUntil = 0;
-const multiplayerPlayerId = (() => {
+const AUTH_SESSION_KEY = 'spaceHeavenAccountSession';
+let authSession = null;
+try { authSession = JSON.parse(sessionStorage.getItem(AUTH_SESSION_KEY) || 'null'); } catch { authSession = null; }
+const authGate = document.getElementById('authGate');
+const authForm = document.getElementById('authForm');
+const authTitle = document.getElementById('authTitle');
+const authDescription = document.getElementById('authDescription');
+const authUsernameField = document.getElementById('authUsernameField');
+const authUsernameInput = document.getElementById('authUsername');
+const authEmailInput = document.getElementById('authEmail');
+const authPasswordInput = document.getElementById('authPassword');
+const authError = document.getElementById('authError');
+const authSubmit = document.getElementById('authSubmit');
+const authModeToggle = document.getElementById('authModeToggle');
+let authIsLogin = false;
+let accountReady = false;
+let multiplayerPlayerId = (() => {
+  if (authSession?.user?.id) return authSession.user.id;
   const key = 'spaceHeavenMultiplayerId';
   let id = localStorage.getItem(key);
   if (!id) {
@@ -110,7 +127,7 @@ const multiplayerPlayerId = (() => {
   }
   return id;
 })();
-const multiplayerName = `Piloto-${multiplayerPlayerId.slice(0, 4).toUpperCase()}`;
+let multiplayerName = authSession?.user?.username || `Piloto-${multiplayerPlayerId.slice(0, 4).toUpperCase()}`;
 let multiplayerPlayers = [];
 let multiplayerReady = false;
 let multiplayerSyncBusy = false;
@@ -127,6 +144,90 @@ const multiplayerSyncedSurfaceEntities = new Set();
 const multiplayerEndpoint = /^https?:$/.test(location.protocol)
   ? `${location.origin}/api/players`
   : null;
+if (authGate) authGate.hidden = !multiplayerEndpoint;
+if (!multiplayerEndpoint) accountReady = true;
+
+function setAuthMode(login) {
+  authIsLogin = login;
+  authTitle.textContent = login ? 'Iniciar sesión' : 'Crear cuenta';
+  authDescription.textContent = login ? 'Entra con el correo de tu cuenta.' : 'Regístrate para entrar al juego online.';
+  authUsernameField.hidden = login;
+  authUsernameInput.required = !login;
+  authUsernameInput.autocomplete = login ? 'off' : 'username';
+  authEmailInput.autocomplete = login ? 'username' : 'email';
+  authPasswordInput.autocomplete = login ? 'current-password' : 'new-password';
+  authSubmit.textContent = login ? 'Iniciar sesión y jugar' : 'Registrarme y jugar';
+  authModeToggle.textContent = login ? '¿No tienes cuenta? · Regístrate' : 'Ya tengo cuenta · Iniciar sesión';
+  authError.hidden = true;
+}
+
+async function authenticate(mode, values) {
+  const response = await fetch(`/api/auth/${mode}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(values),
+    cache: 'no-store',
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'No se pudo iniciar sesión.');
+  authSession = result;
+  sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
+  multiplayerPlayerId = result.user.id;
+  multiplayerName = result.user.username;
+  accountReady = true;
+  authGate.hidden = true;
+  authPasswordInput.value = '';
+  syncMultiplayer();
+}
+
+authModeToggle?.addEventListener('click', () => setAuthMode(!authIsLogin));
+authForm?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  authError.hidden = true;
+  authSubmit.disabled = true;
+  authSubmit.textContent = 'Conectando…';
+  try {
+    await authenticate(authIsLogin ? 'login' : 'register', {
+      username: authUsernameInput.value.trim(),
+      email: authEmailInput.value.trim(),
+      password: authPasswordInput.value,
+    });
+  } catch (error) {
+    authError.textContent = error.message || 'No se pudo conectar con el servidor.';
+    authError.hidden = false;
+  } finally {
+    authSubmit.disabled = false;
+    authSubmit.textContent = authIsLogin ? 'Iniciar sesión y jugar' : 'Registrarme y jugar';
+  }
+});
+
+async function restoreAccountSession() {
+  if (!multiplayerEndpoint) return;
+  if (authSession?.token) {
+    try {
+      const response = await fetch('/api/auth/me', {
+        headers: { Authorization: `Bearer ${authSession.token}` },
+        cache: 'no-store',
+      });
+      if (!response.ok) throw new Error('Sesión vencida.');
+      const result = await response.json();
+      authSession.user = result.user;
+      multiplayerPlayerId = result.user.id;
+      multiplayerName = result.user.username;
+      sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
+      accountReady = true;
+      authGate.hidden = true;
+      return;
+    } catch {
+      authSession = null;
+      sessionStorage.removeItem(AUTH_SESSION_KEY);
+    }
+  }
+  setAuthMode(false);
+  authGate.hidden = false;
+}
+
+if (multiplayerEndpoint) restoreAccountSession();
 let lastGameSaveAt = 0;
 let draggedInventoryItem = null;
 let draggedItemDroppedInsideInterface = false;
@@ -905,17 +1006,18 @@ function getMultiplayerSnapshot() {
 }
 
 async function syncMultiplayer() {
-  if (!multiplayerEndpoint || multiplayerSyncBusy) return;
+  if (!multiplayerEndpoint || !accountReady || !authSession?.token || multiplayerSyncBusy) return;
   multiplayerSyncBusy = true;
   try {
     const response = await fetch(multiplayerEndpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authSession.token}` },
       body: JSON.stringify(getMultiplayerSnapshot()),
       cache: 'no-store',
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const peersResponse = await fetch(`${multiplayerEndpoint}?self=${encodeURIComponent(multiplayerPlayerId)}`, {
+      headers: { Authorization: `Bearer ${authSession.token}` },
       cache: 'no-store',
     });
     if (!peersResponse.ok) throw new Error(`HTTP ${peersResponse.status}`);
@@ -962,7 +1064,6 @@ async function syncMultiplayer() {
 
 if (multiplayerEndpoint) {
   multiplayerStatus.hidden = false;
-  window.setTimeout(syncMultiplayer, 0);
   window.setInterval(syncMultiplayer, 90);
 }
 
@@ -11334,6 +11435,10 @@ pauseMenu.addEventListener('wheel', (event) => event.stopPropagation(), { passiv
 applyHudScale();
 
 function frame(timestamp) {
+  if (!accountReady) {
+    requestAnimationFrame(frame);
+    return;
+  }
   const delta = Math.min((timestamp - game.lastTime) / 1000 || 0.016, 0.032);
   game.lastTime = timestamp;
 
