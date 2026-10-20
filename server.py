@@ -29,15 +29,21 @@ PASSWORD_ITERATIONS = 310_000
 def load_accounts() -> dict:
     try:
         data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
-        if isinstance(data, dict) and isinstance(data.get("accounts"), list):
+        if (
+            isinstance(data, dict)
+            and data.get("schema_version") == 2
+            and isinstance(data.get("accounts"), list)
+            and isinstance(data.get("sessions"), dict)
+        ):
             data.setdefault("sessions", {})
             return data
     except (OSError, json.JSONDecodeError):
         pass
-    return {"accounts": [], "sessions": {}}
+    return {"schema_version": 2, "accounts": [], "sessions": {}}
 
 
 def save_accounts(data: dict) -> None:
+    data["schema_version"] = 2
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix="accounts-", suffix=".tmp", dir=DATA_DIR)
     try:
@@ -52,6 +58,13 @@ def save_accounts(data: dict) -> None:
 
 
 ACCOUNTS = load_accounts()
+if ACCOUNTS_FILE.exists():
+    try:
+        saved_accounts = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
+        if not isinstance(saved_accounts, dict) or saved_accounts.get("schema_version") != 2:
+            save_accounts(ACCOUNTS)
+    except (OSError, json.JSONDecodeError):
+        save_accounts(ACCOUNTS)
 
 
 def hash_password(password: str, salt: bytes | None = None) -> tuple[str, str]:
@@ -61,7 +74,7 @@ def hash_password(password: str, salt: bytes | None = None) -> tuple[str, str]:
 
 
 def public_user(account: dict) -> dict:
-    return {"id": account["id"], "username": account["username"], "email": account["email"]}
+    return {"id": account["id"], "username": account["username"]}
 
 
 def create_session(account: dict) -> dict:
@@ -188,26 +201,22 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 if not isinstance(payload, dict):
                     self.send_json(400, {"error": "Datos inválidos."})
                     return
-                email = str(payload.get("email", "")).strip().lower()
+                username = str(payload.get("username", "")).strip()
                 password = str(payload.get("password", ""))
                 with AUTH_LOCK:
-                    account = next((a for a in ACCOUNTS["accounts"] if a["email"] == email), None)
+                    account = next((a for a in ACCOUNTS["accounts"] if a["username"].casefold() == username.casefold()), None)
                     if route == "/api/auth/register":
-                        username = str(payload.get("username", "")).strip()
                         if not re.fullmatch(r"[A-Za-z0-9_.-]{3,24}", username):
                             self.send_json(400, {"error": "El usuario debe tener 3 a 24 caracteres: letras, números, punto, guion o _."})
-                            return
-                        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email):
-                            self.send_json(400, {"error": "Escribe un correo válido."})
                             return
                         if len(password) < 8 or len(password) > 256:
                             self.send_json(400, {"error": "La contraseña debe tener al menos 8 caracteres."})
                             return
-                        if account or any(a["username"].casefold() == username.casefold() for a in ACCOUNTS["accounts"]):
-                            self.send_json(409, {"error": "Ese correo o nombre de usuario ya está registrado. Inicia sesión si ya tienes cuenta."})
+                        if account:
+                            self.send_json(409, {"error": "Ese nombre de usuario ya está registrado. Inicia sesión si ya tienes cuenta."})
                             return
                         salt, password_hash = hash_password(password)
-                        account = {"id": secrets.token_hex(16), "username": username, "email": email,
+                        account = {"id": secrets.token_hex(16), "username": username,
                                    "password_salt": salt, "password_hash": password_hash}
                         ACCOUNTS["accounts"].append(account)
                     else:
@@ -215,7 +224,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                         _, attempted = hash_password(password, salt)
                         valid = account is not None and hmac.compare_digest(attempted, account["password_hash"])
                         if not valid:
-                            self.send_json(401, {"error": "Correo o contraseña incorrectos."})
+                            self.send_json(401, {"error": "Usuario o contraseña incorrectos."})
                             return
                     result = create_session(account)
                 self.send_json(201 if route.endswith("register") else 200, result)

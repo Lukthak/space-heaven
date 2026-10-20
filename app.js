@@ -107,9 +107,7 @@ const authGate = document.getElementById('authGate');
 const authForm = document.getElementById('authForm');
 const authTitle = document.getElementById('authTitle');
 const authDescription = document.getElementById('authDescription');
-const authUsernameField = document.getElementById('authUsernameField');
 const authUsernameInput = document.getElementById('authUsername');
-const authEmailInput = document.getElementById('authEmail');
 const authPasswordInput = document.getElementById('authPassword');
 const authError = document.getElementById('authError');
 const authSubmit = document.getElementById('authSubmit');
@@ -154,11 +152,9 @@ if (!multiplayerEndpoint) GAME_SAVE_KEY = 'spaceheaven-save-v1';
 function setAuthMode(login) {
   authIsLogin = login;
   authTitle.textContent = login ? 'Iniciar sesión' : 'Crear cuenta';
-  authDescription.textContent = login ? 'Entra con el correo de tu cuenta.' : 'Regístrate para entrar al juego online.';
-  authUsernameField.hidden = login;
-  authUsernameInput.required = !login;
-  authUsernameInput.autocomplete = login ? 'off' : 'username';
-  authEmailInput.autocomplete = login ? 'username' : 'email';
+  authDescription.textContent = login ? 'Entra con tu nombre de usuario y contraseña.' : 'Regístrate con un usuario y una contraseña.';
+  authUsernameInput.required = true;
+  authUsernameInput.autocomplete = 'username';
   authPasswordInput.autocomplete = login ? 'current-password' : 'new-password';
   authSubmit.textContent = login ? 'Iniciar sesión y jugar' : 'Registrarme y jugar';
   authModeToggle.textContent = login ? '¿No tienes cuenta? · Regístrate' : 'Ya tengo cuenta · Iniciar sesión';
@@ -195,7 +191,6 @@ authForm?.addEventListener('submit', async (event) => {
   try {
     await authenticate(authIsLogin ? 'login' : 'register', {
       username: authUsernameInput.value.trim(),
-      email: authEmailInput.value.trim(),
       password: authPasswordInput.value,
     });
   } catch (error) {
