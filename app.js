@@ -116,6 +116,7 @@ const authSubmit = document.getElementById('authSubmit');
 const authModeToggle = document.getElementById('authModeToggle');
 let authIsLogin = false;
 let accountReady = false;
+let GAME_SAVE_KEY = null;
 let multiplayerPlayerId = (() => {
   if (authSession?.user?.id) return authSession.user.id;
   const key = 'spaceHeavenMultiplayerId';
@@ -146,6 +147,7 @@ const multiplayerEndpoint = /^https?:$/.test(location.protocol)
   : null;
 if (authGate) authGate.hidden = !multiplayerEndpoint;
 if (!multiplayerEndpoint) accountReady = true;
+if (!multiplayerEndpoint) GAME_SAVE_KEY = 'spaceheaven-save-v1';
 
 function setAuthMode(login) {
   authIsLogin = login;
@@ -177,6 +179,8 @@ async function authenticate(mode, values) {
   accountReady = true;
   authGate.hidden = true;
   authPasswordInput.value = '';
+  GAME_SAVE_KEY = `spaceheaven-save-v1-${result.user.id}`;
+  startGameForAccount();
   syncMultiplayer();
 }
 
@@ -217,6 +221,8 @@ async function restoreAccountSession() {
       sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
       accountReady = true;
       authGate.hidden = true;
+      GAME_SAVE_KEY = `spaceheaven-save-v1-${result.user.id}`;
+      startGameForAccount();
       return;
     } catch {
       authSession = null;
@@ -327,7 +333,6 @@ const RESOURCE_CATALOG = {
 };
 const STAR_MIN_CHUNK_DISTANCE = 20;
 const BLACK_HOLE_MIN_CHUNK_DISTANCE = 40;
-const GAME_SAVE_KEY = 'spaceheaven-save-v1';
 let savingDisabled = false;
 // Sprites 16x16 de las piezas fabricables, incrustados para no depender de archivos externos.
 const CRAFT_SPRITES = {
@@ -7331,6 +7336,7 @@ function updateMarketPanel() {
 }
 
 function loadGameState() {
+  if (!GAME_SAVE_KEY) return null;
   let serializedState;
   try {
     serializedState = localStorage.getItem(GAME_SAVE_KEY);
@@ -7502,7 +7508,7 @@ function restoreNavigationState(savedNavigation) {
 }
 
 function saveGameState() {
-  if (savingDisabled) return;
+  if (savingDisabled || !GAME_SAVE_KEY || (multiplayerEndpoint && !accountReady)) return;
   stackMatchingItems(game.player.inventorySlots, false);
   stackMatchingItems(game.player.chestSlots, true);
   captureInventoryScrollPositions();
@@ -10372,7 +10378,7 @@ function drawSurfaceScene() {
     ctx.restore();
   }
   const playerSpriteHalfHeight = game.player.hoverboardEquipped ? 24 : PLAYER_SPRITE_SIZE / 2;
-  drawWorldText('JUGADOR', game.surface.x, game.surface.y - playerSpriteHalfHeight - 8, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
+  drawWorldText(multiplayerName, game.surface.x, game.surface.y - playerSpriteHalfHeight - 8, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
   drawPlayerChatBubble(
     game.surface.x,
     game.surface.y - playerSpriteHalfHeight - WORLD_FONT_SIZE / 1.5 - 18
@@ -10757,7 +10763,7 @@ function draw() {
   drawEmergencyServiceShip();
   drawRemoteSpaceLabels();
   drawEnemyEdgeIndicators();
-  drawWorldText('JUGADOR', game.width / 2, game.height / 2 - 22, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
+  drawWorldText(multiplayerName, game.width / 2, game.height / 2 - 22, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
   drawPlayerChatBubble(game.width / 2, game.height / 2 - 34);
   drawRadar();
   drawSpaceFrame();
@@ -12036,45 +12042,45 @@ closeInventoryBtn.addEventListener('click', () => toggleInventory(false));
 window.addEventListener('pagehide', saveGameState);
 window.addEventListener('beforeunload', saveGameState);
 
-updateVisibleChunks();
-updatePlanetPositions();
-resizeCanvas();
-window.addEventListener('resize', resizeCanvas);
-const savedGameState = loadGameState();
-const restoredGameState = Boolean(savedGameState && restoreGameState(savedGameState));
-let newGameHomeworld = null;
-if (!restoredGameState) {
-  const homeworld = game.planets.find((planet) => planet.isHomeworld);
-  if (homeworld) {
-    newGameHomeworld = homeworld;
-    game.selectedPlanet = homeworld;
-    game.player.x = homeworld.x + homeworld.radius + 8;
-    game.player.y = homeworld.y;
-    updateVisibleChunks();
-    updatePlanetPositions();
+let gameStartedForAccount = false;
+function startGameForAccount() {
+  if (gameStartedForAccount || !GAME_SAVE_KEY) return;
+  gameStartedForAccount = true;
+  updateVisibleChunks();
+  updatePlanetPositions();
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+  const savedGameState = loadGameState();
+  const restoredGameState = Boolean(savedGameState && restoreGameState(savedGameState));
+  let newGameHomeworld = null;
+  if (!restoredGameState) {
+    const homeworld = game.planets.find((planet) => planet.isHomeworld);
+    if (homeworld) {
+      newGameHomeworld = homeworld;
+      game.selectedPlanet = homeworld;
+      game.player.x = homeworld.x + homeworld.radius + 8;
+      game.player.y = homeworld.y;
+      updateVisibleChunks();
+      updatePlanetPositions();
+    }
   }
+  if (!restoredGameState || savedGameState.fuelBonusGranted !== true) {
+    addResourceToInventory('fuel', 10);
+  }
+  if (newGameHomeworld) enterPlanet(newGameHomeworld);
+  game.selectedPlanet = game.scene === 'surface' ? game.surface.planet : getNearestPlanet();
+  if (currentInventoryView === 'market' && (game.scene !== 'surface' || !isHomeworld(game.surface.planet))) {
+    currentInventoryView = lastInventoryTab;
+  }
+  updateHud();
+  applyInventoryWindowGeometry();
+  if (!inventoryPanel.hidden) {
+    applyInventoryScrollPositions();
+    showInventoryView(currentInventoryView);
+  }
+  setMessage(game.scene === 'surface' ? game.surface.planet.name : 'Espacio');
+  saveGameStateIfDue();
 }
-if (!restoredGameState || savedGameState.fuelBonusGranted !== true) {
-  addResourceToInventory('fuel', 10);
-}
-if (newGameHomeworld) {
-  enterPlanet(newGameHomeworld);
-}
-game.selectedPlanet = game.scene === 'surface'
-  ? game.surface.planet
-  : getNearestPlanet();
-if (
-  currentInventoryView === 'market' &&
-  (game.scene !== 'surface' || !isHomeworld(game.surface.planet))
-) {
-  currentInventoryView = lastInventoryTab;
-}
-updateHud();
-applyInventoryWindowGeometry();
-if (!inventoryPanel.hidden) {
-  applyInventoryScrollPositions();
-  showInventoryView(currentInventoryView);
-}
-setMessage(game.scene === 'surface' ? game.surface.planet.name : 'Espacio');
-saveGameStateIfDue();
+
+if (!multiplayerEndpoint) startGameForAccount();
 requestAnimationFrame(frame);
