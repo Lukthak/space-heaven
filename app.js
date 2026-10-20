@@ -1046,32 +1046,13 @@ async function syncMultiplayer() {
     multiplayerWorlds = Array.isArray(responseState) ? {} : (responseState.worlds || {});
     multiplayerWorldRevision += 1;
     const previousPlayers = new Map(multiplayerPlayers.map((player) => [player.id, player]));
-    const receivedAt = Date.now();
     multiplayerPlayers = Array.isArray(peers) ? peers.map((player) => {
       const previous = previousPlayers.get(player.id);
       const sameLocation = previous
         && previous.scene === player.scene
         && (player.scene !== 'surface' || previous.planet?.toLowerCase() === player.planet?.toLowerCase());
-      let surfaceVelocityX = sameLocation ? (previous.surfaceVelocityX || 0) : 0;
-      let surfaceVelocityY = sameLocation ? (previous.surfaceVelocityY || 0) : 0;
-      const snapshotDelta = sameLocation ? (player.sentAt - previous.sentAt) / 1000 : 0;
-      if (player.scene === 'surface' && snapshotDelta > 0.015 && snapshotDelta < 1) {
-        let dx = player.surfaceX - previous.surfaceX;
-        let dy = player.surfaceY - previous.surfaceY;
-        if (dx > 0.5) dx -= 1;
-        if (dx < -0.5) dx += 1;
-        if (dy > 0.5) dy -= 1;
-        if (dy < -0.5) dy += 1;
-        const estimateX = clamp(dx * SURFACE_WORLD_SIZE / snapshotDelta, -1200, 1200);
-        const estimateY = clamp(dy * SURFACE_WORLD_SIZE / snapshotDelta, -1200, 1200);
-        surfaceVelocityX = surfaceVelocityX * 0.35 + estimateX * 0.65;
-        surfaceVelocityY = surfaceVelocityY * 0.35 + estimateY * 0.65;
-      }
       return {
         ...player,
-        receivedAt,
-        surfaceVelocityX,
-        surfaceVelocityY,
         drawX: sameLocation ? (previous.drawX ?? previous.x) : player.x,
         drawY: sameLocation ? (previous.drawY ?? previous.y) : player.y,
         drawSurfaceX: sameLocation ? (previous.drawSurfaceX ?? previous.surfaceX) : player.surfaceX,
@@ -1096,23 +1077,16 @@ async function syncMultiplayer() {
 
 if (multiplayerEndpoint) {
   multiplayerStatus.hidden = false;
-  window.setInterval(syncMultiplayer, 50);
+  window.setInterval(syncMultiplayer, 33);
 }
 
 function updateMultiplayerInterpolation(dt) {
-  const blend = 1 - Math.exp(-36 * dt);
+  const blend = 1 - Math.exp(-60 * dt);
   for (const remote of multiplayerPlayers) {
-    const predictionSeconds = Math.min(Math.max((Date.now() - remote.receivedAt) / 1000, 0), 0.14);
-    const targetX = remote.x + (remote.scene === 'space' ? (remote.velocityX || 0) * predictionSeconds : 0);
-    const targetY = remote.y + (remote.scene === 'space' ? (remote.velocityY || 0) * predictionSeconds : 0);
-    remote.drawX += (targetX - remote.drawX) * blend;
-    remote.drawY += (targetY - remote.drawY) * blend;
-    let predictedSurfaceX = remote.surfaceX + (remote.surfaceVelocityX || 0) * predictionSeconds / SURFACE_WORLD_SIZE;
-    let predictedSurfaceY = remote.surfaceY + (remote.surfaceVelocityY || 0) * predictionSeconds / SURFACE_WORLD_SIZE;
-    predictedSurfaceX = (predictedSurfaceX % 1 + 1) % 1;
-    predictedSurfaceY = (predictedSurfaceY % 1 + 1) % 1;
-    let surfaceDeltaX = predictedSurfaceX - remote.drawSurfaceX;
-    let surfaceDeltaY = predictedSurfaceY - remote.drawSurfaceY;
+    remote.drawX += (remote.x - remote.drawX) * blend;
+    remote.drawY += (remote.y - remote.drawY) * blend;
+    let surfaceDeltaX = remote.surfaceX - remote.drawSurfaceX;
+    let surfaceDeltaY = remote.surfaceY - remote.drawSurfaceY;
     if (surfaceDeltaX > 0.5) surfaceDeltaX -= 1;
     if (surfaceDeltaX < -0.5) surfaceDeltaX += 1;
     if (surfaceDeltaY > 0.5) surfaceDeltaY -= 1;
@@ -11507,6 +11481,7 @@ function frame(timestamp) {
 }
 
 window.addEventListener('keydown', (event) => {
+  if (authGate && !authGate.hidden) return;
   const key = event.key.toLowerCase();
 
   if (earthWandererDialogOpen) {
@@ -11707,6 +11682,7 @@ marketPanel.addEventListener('click', (event) => {
 });
 
 window.addEventListener('keyup', (event) => {
+  if (authGate && !authGate.hidden) return;
   game.keys[event.key.toLowerCase()] = false;
 });
 
