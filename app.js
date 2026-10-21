@@ -100,23 +100,7 @@ let earthWandererDialogText = '';
 let earthWandererTipIndex = 0;
 let playerChatMessage = '';
 let playerChatMessageUntil = 0;
-const AUTH_SESSION_KEY = 'spaceHeavenAccountSession';
-let authSession = null;
-try { authSession = JSON.parse(localStorage.getItem(AUTH_SESSION_KEY) || 'null'); } catch { authSession = null; }
-const authGate = document.getElementById('authGate');
-const authForm = document.getElementById('authForm');
-const authTitle = document.getElementById('authTitle');
-const authDescription = document.getElementById('authDescription');
-const authUsernameInput = document.getElementById('authUsername');
-const authPasswordInput = document.getElementById('authPassword');
-const authError = document.getElementById('authError');
-const authSubmit = document.getElementById('authSubmit');
-const authModeToggle = document.getElementById('authModeToggle');
-let authIsLogin = false;
-let accountReady = false;
-let GAME_SAVE_KEY = null;
-let multiplayerPlayerId = (() => {
-  if (authSession?.user?.id) return authSession.user.id;
+const multiplayerPlayerId = (() => {
   const key = 'spaceHeavenMultiplayerId';
   let id = localStorage.getItem(key);
   if (!id) {
@@ -126,12 +110,10 @@ let multiplayerPlayerId = (() => {
   }
   return id;
 })();
-let multiplayerName = authSession?.user?.username || `Piloto-${multiplayerPlayerId.slice(0, 4).toUpperCase()}`;
+const multiplayerName = `Piloto-${multiplayerPlayerId.slice(0, 4).toUpperCase()}`;
 let multiplayerPlayers = [];
 let multiplayerReady = false;
 let multiplayerSyncBusy = false;
-let lastMultiplayerWorldSentAt = 0;
-let lastMultiplayerWorldPlanetSent = '';
 let multiplayerChatMessage = '';
 let multiplayerChatMessageUntil = 0;
 let multiplayerWorldOwnerId = '';
@@ -145,92 +127,6 @@ const multiplayerSyncedSurfaceEntities = new Set();
 const multiplayerEndpoint = /^https?:$/.test(location.protocol)
   ? `${location.origin}/api/players`
   : null;
-if (authGate) authGate.hidden = !multiplayerEndpoint;
-if (!multiplayerEndpoint) accountReady = true;
-if (!multiplayerEndpoint) GAME_SAVE_KEY = 'spaceheaven-save-v1';
-
-function setAuthMode(login) {
-  authIsLogin = login;
-  authTitle.textContent = login ? 'Iniciar sesión' : 'Crear cuenta';
-  authDescription.textContent = login ? 'Entra con tu nombre de usuario y contraseña.' : 'Regístrate con un usuario y una contraseña.';
-  authUsernameInput.required = true;
-  authUsernameInput.autocomplete = 'username';
-  authPasswordInput.autocomplete = login ? 'current-password' : 'new-password';
-  authSubmit.textContent = login ? 'Iniciar sesión y jugar' : 'Registrarme y jugar';
-  authModeToggle.textContent = login ? '¿No tienes cuenta? · Regístrate' : 'Ya tengo cuenta · Iniciar sesión';
-  authError.hidden = true;
-}
-
-async function authenticate(mode, values) {
-  const response = await fetch(`/api/auth/${mode}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(values),
-    cache: 'no-store',
-  });
-  const result = await response.json();
-  if (!response.ok) throw new Error(result.error || 'No se pudo iniciar sesión.');
-  authSession = result;
-  localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
-  multiplayerPlayerId = result.user.id;
-  multiplayerName = result.user.username;
-  accountReady = true;
-  authGate.hidden = true;
-  authPasswordInput.value = '';
-  GAME_SAVE_KEY = `spaceheaven-save-v1-${result.user.id}`;
-  startGameForAccount();
-  syncMultiplayer();
-}
-
-authModeToggle?.addEventListener('click', () => setAuthMode(!authIsLogin));
-authForm?.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  authError.hidden = true;
-  authSubmit.disabled = true;
-  authSubmit.textContent = 'Conectando…';
-  try {
-    await authenticate(authIsLogin ? 'login' : 'register', {
-      username: authUsernameInput.value.trim(),
-      password: authPasswordInput.value,
-    });
-  } catch (error) {
-    authError.textContent = error.message || 'No se pudo conectar con el servidor.';
-    authError.hidden = false;
-  } finally {
-    authSubmit.disabled = false;
-    authSubmit.textContent = authIsLogin ? 'Iniciar sesión y jugar' : 'Registrarme y jugar';
-  }
-});
-
-async function restoreAccountSession() {
-  if (!multiplayerEndpoint) return;
-  if (authSession?.token) {
-    try {
-      const response = await fetch('/api/auth/me', {
-        headers: { Authorization: `Bearer ${authSession.token}` },
-        cache: 'no-store',
-      });
-      if (!response.ok) throw new Error('Sesión vencida.');
-      const result = await response.json();
-      authSession.user = result.user;
-      multiplayerPlayerId = result.user.id;
-      multiplayerName = result.user.username;
-      localStorage.setItem(AUTH_SESSION_KEY, JSON.stringify(authSession));
-      accountReady = true;
-      authGate.hidden = true;
-      GAME_SAVE_KEY = `spaceheaven-save-v1-${result.user.id}`;
-      startGameForAccount();
-      return;
-    } catch {
-      authSession = null;
-      localStorage.removeItem(AUTH_SESSION_KEY);
-    }
-  }
-  setAuthMode(false);
-  authGate.hidden = false;
-}
-
-if (multiplayerEndpoint) restoreAccountSession();
 let lastGameSaveAt = 0;
 let draggedInventoryItem = null;
 let draggedItemDroppedInsideInterface = false;
@@ -330,6 +226,7 @@ const RESOURCE_CATALOG = {
 };
 const STAR_MIN_CHUNK_DISTANCE = 20;
 const BLACK_HOLE_MIN_CHUNK_DISTANCE = 40;
+const GAME_SAVE_KEY = 'spaceheaven-save-v1';
 let savingDisabled = false;
 // Sprites 16x16 de las piezas fabricables, incrustados para no depender de archivos externos.
 const CRAFT_SPRITES = {
@@ -984,6 +881,34 @@ function getMultiplayerSnapshot() {
       }))
       : null,
   } : null;
+  // Estado visual del jugador en superficie (hoverboard, pose de inventario, armas) para que los demás lo vean.
+  const knifeSwinging = Boolean(
+    onSurface && isSurfaceItemEquipped(COBALTO_KNIFE_ITEM_ID) && game.time < (game.surface.knifeSlashUntil ?? 0)
+  );
+  const gunShooting = Boolean(
+    onSurface && !knifeSwinging && getEquippedSurfaceGun() &&
+    (game.time < (game.surface.shotUntil ?? 0) || game.time < (game.surface.gunFiredUntil ?? 0))
+  );
+  const pose = onSurface ? {
+    inventory: !inventoryPanel.hidden
+      ? (Date.now() < playerInventoryClickUntil ? (playerInventoryClickFlipped ? 3 : 2) : 1)
+      : 0,
+    hoverboard: Boolean(game.player.hoverboardEquipped),
+    moving: Boolean(game.surface.isMoving),
+    groundBoard: game.surface.hoverboard?.deployed
+      ? {
+        x: game.surface.hoverboard.x / SURFACE_WORLD_SIZE,
+        y: game.surface.hoverboard.y / SURFACE_WORLD_SIZE,
+      }
+      : null,
+    shooting: gunShooting,
+    knife: knifeSwinging,
+    knifeFacing: game.surface.knifeSlashFacing ?? game.surface.facing,
+    flash: game.time < (game.player.surfaceDamageFlashUntil ?? 0),
+  } : null;
+  const capsule = game.scene === 'space' && game.emergencyReturn
+    ? (game.emergencyReturnCause === 'tow' ? 'tow' : (game.emergencyCapsule?.stage ?? 1))
+    : 0;
   return {
     id: multiplayerPlayerId,
     name: multiplayerName,
@@ -1000,36 +925,31 @@ function getMultiplayerSnapshot() {
     animationFrame: onSurface ? game.surface.animationFrame : 1,
     hue: game.player.hue,
     shipParts: game.player.shipParts,
+    pose,
+    capsule,
     surfaceWorld,
+    collectedPickupIds: [...game.player.collectedPickupIds].slice(-5000),
     chat: Date.now() < multiplayerChatMessageUntil ? multiplayerChatMessage : '',
     sentAt: Date.now(),
   };
 }
 
 async function syncMultiplayer() {
-  if (!multiplayerEndpoint || !accountReady || !authSession?.token || multiplayerSyncBusy) return;
+  if (!multiplayerEndpoint || multiplayerSyncBusy) return;
   multiplayerSyncBusy = true;
   try {
-    const snapshot = getMultiplayerSnapshot();
-    if (snapshot.surfaceWorld) {
-      const changedWorld = snapshot.surfaceWorld.planet !== lastMultiplayerWorldPlanetSent;
-      const shouldSendWorld = changedWorld || !multiplayerReady || multiplayerIsWorldOwner
-        ? changedWorld || Date.now() - lastMultiplayerWorldSentAt >= 500
-        : false;
-      if (shouldSendWorld) {
-        lastMultiplayerWorldSentAt = Date.now();
-        lastMultiplayerWorldPlanetSent = snapshot.surfaceWorld.planet;
-      }
-      else delete snapshot.surfaceWorld;
-    }
     const response = await fetch(multiplayerEndpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${authSession.token}` },
-      body: JSON.stringify(snapshot),
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(getMultiplayerSnapshot()),
       cache: 'no-store',
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const responseState = await response.json();
+    const peersResponse = await fetch(`${multiplayerEndpoint}?self=${encodeURIComponent(multiplayerPlayerId)}`, {
+      cache: 'no-store',
+    });
+    if (!peersResponse.ok) throw new Error(`HTTP ${peersResponse.status}`);
+    const responseState = await peersResponse.json();
     const peers = Array.isArray(responseState) ? responseState : responseState.players;
     const activeWorldKey = game.scene === 'surface' && game.surface
       ? game.surface.planet.name.toLowerCase()
@@ -1048,6 +968,8 @@ async function syncMultiplayer() {
         && (player.scene !== 'surface' || previous.planet?.toLowerCase() === player.planet?.toLowerCase());
       return {
         ...player,
+        poseShootUntil: player.pose?.shooting ? Date.now() + 180 : (previous?.poseShootUntil ?? 0),
+        poseKnifeUntil: player.pose?.knife ? Date.now() + 160 : (previous?.poseKnifeUntil ?? 0),
         drawX: sameLocation ? (previous.drawX ?? previous.x) : player.x,
         drawY: sameLocation ? (previous.drawY ?? previous.y) : player.y,
         drawSurfaceX: sameLocation ? (previous.drawSurfaceX ?? previous.surfaceX) : player.surfaceX,
@@ -1072,11 +994,12 @@ async function syncMultiplayer() {
 
 if (multiplayerEndpoint) {
   multiplayerStatus.hidden = false;
-  window.setInterval(syncMultiplayer, 33);
+  window.setTimeout(syncMultiplayer, 0);
+  window.setInterval(syncMultiplayer, 90);
 }
 
 function updateMultiplayerInterpolation(dt) {
-  const blend = 1 - Math.exp(-60 * dt);
+  const blend = 1 - Math.exp(-14 * dt);
   for (const remote of multiplayerPlayers) {
     remote.drawX += (remote.x - remote.drawX) * blend;
     remote.drawY += (remote.y - remote.drawY) * blend;
@@ -7339,7 +7262,6 @@ function updateMarketPanel() {
 }
 
 function loadGameState() {
-  if (!GAME_SAVE_KEY) return null;
   let serializedState;
   try {
     serializedState = localStorage.getItem(GAME_SAVE_KEY);
@@ -7511,7 +7433,7 @@ function restoreNavigationState(savedNavigation) {
 }
 
 function saveGameState() {
-  if (savingDisabled || !GAME_SAVE_KEY || (multiplayerEndpoint && !accountReady)) return;
+  if (savingDisabled) return;
   stackMatchingItems(game.player.inventorySlots, false);
   stackMatchingItems(game.player.chestSlots, true);
   captureInventoryScrollPositions();
@@ -8769,6 +8691,46 @@ function drawRemotePlayersSpace() {
     ctx.save();
     ctx.translate(screenX, screenY);
     ctx.rotate(remote.rotation || 0);
+    if (remote.capsule) {
+      if (remote.capsule === 'tow') {
+        drawShipParts(ctx, 0, 0, 6, remote.shipParts);
+        ctx.fillStyle = '#55e8ff';
+        ctx.strokeStyle = '#d8fbff';
+        ctx.lineWidth = 1;
+        ctx.fillRect(-19, -3, 7, 6);
+        ctx.fillRect(12, -3, 7, 6);
+        ctx.beginPath();
+        ctx.moveTo(-19, 0);
+        ctx.lineTo(-11, 0);
+        ctx.moveTo(11, 0);
+        ctx.lineTo(19, 0);
+        ctx.stroke();
+      } else if (remote.capsule === 2) {
+        ctx.shadowColor = '#ffffff';
+        ctx.shadowBlur = 8;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(0, 0, 2, 0, Math.PI * 2);
+        ctx.fill();
+      } else {
+        ctx.shadowColor = '#ffcf70';
+        ctx.shadowBlur = 6;
+        ctx.fillStyle = '#e8edf2';
+        ctx.strokeStyle = '#ffcf70';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(0, 0, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#42536b';
+        ctx.beginPath();
+        ctx.arc(0, 0, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+      continue;
+    }
     const speed = Math.hypot(remote.velocityX || 0, remote.velocityY || 0);
     if (remote.shipParts?.propulsor && speed > 1) {
       const flameLength = clamp(4 + speed * 0.02, 4, 48);
@@ -8781,20 +8743,134 @@ function drawRemotePlayersSpace() {
   }
 }
 
+// Dibuja el cuerpo de un jugador remoto con la misma pose que ve él: inventario, hoverboard, disparo o caminando.
+function drawRemoteSurfaceBody(remote, surfaceX, surfaceY, point) {
+  const pose = remote.pose || {};
+  const hue = remote.hue || 120;
+  const facing = remote.facing || 'down';
+  const now = Date.now();
+  const knifeActive = Boolean(pose.knife) || now < (remote.poseKnifeUntil ?? 0);
+  const shooting = !knifeActive && (Boolean(pose.shooting) || now < (remote.poseShootUntil ?? 0));
+
+  if (pose.inventory) {
+    const poseSprite = pose.inventory >= 2 ? PLAYER_INVENTORY_CLICK_SPRITE : PLAYER_INVENTORY_SPRITE;
+    const poseFrame = getPlayerInventoryFrame(poseSprite, hue);
+    if (poseFrame) {
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      if (pose.flash) ctx.filter = 'brightness(0) invert(1)';
+      ctx.translate(point.x, point.y);
+      if (pose.inventory === 3) ctx.scale(-1, 1);
+      ctx.drawImage(poseFrame, -PLAYER_SPRITE_SIZE / 2, -PLAYER_SPRITE_SIZE / 2, PLAYER_SPRITE_SIZE, PLAYER_SPRITE_SIZE);
+      ctx.restore();
+      return true;
+    }
+  }
+  if (pose.hoverboard) {
+    const boardSprite = HOVERBOARD_SPRITES[facing] ?? (facing === 'right' ? HOVERBOARD_SPRITES.left : HOVERBOARD_SPRITES.down);
+    if (boardSprite.complete && boardSprite.naturalWidth >= 96) {
+      const boardFrame = getHoverboardFrame(boardSprite, pose.moving ? (remote.animationFrame || 0) % 2 : 0, hue);
+      if (boardFrame) {
+        ctx.save();
+        ctx.imageSmoothingEnabled = false;
+        if (pose.flash) ctx.filter = 'brightness(0) invert(1)';
+        ctx.translate(point.x, point.y);
+        if (facing === 'right') ctx.scale(-1, 1);
+        ctx.drawImage(boardFrame, -36, -24, 72, 48);
+        ctx.restore();
+        return true;
+      }
+    }
+  }
+  if ((shooting || knifeActive) && SURFACE_SHOT_SPRITE.complete && SURFACE_SHOT_SPRITE.naturalWidth >= 48) {
+    const shotFrames = { up: 0, left: 1, right: 1, down: 2 };
+    const shotFrame = getNpcFrame((shotFrames[facing] ?? 2) * 16, 0, hue, SURFACE_SHOT_SPRITE);
+    if (shotFrame) {
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      if (pose.flash) ctx.filter = 'brightness(0) invert(1)';
+      ctx.translate(point.x, point.y);
+      if (facing === 'right') ctx.scale(-1, 1);
+      ctx.drawImage(shotFrame, -PLAYER_SPRITE_SIZE / 2, -PLAYER_SPRITE_SIZE / 2, PLAYER_SPRITE_SIZE, PLAYER_SPRITE_SIZE);
+      ctx.restore();
+      return true;
+    }
+  }
+  return drawNpcSprite(surfaceX, surfaceY, hue, remote.facing, remote.animationFrame || 1, Boolean(pose.flash));
+}
+
+// Arma que sostiene o ataque que está haciendo un jugador remoto.
+function drawRemoteSurfaceWeapon(remote, point) {
+  const pose = remote.pose || {};
+  const now = Date.now();
+  const facing = remote.facing || 'down';
+  const knifeRemaining = (remote.poseKnifeUntil ?? 0) - now;
+  if (knifeRemaining > 0 && COBALTO_KNIFE_SPRITE.complete && COBALTO_KNIFE_SPRITE.naturalWidth > 0) {
+    const directions = {
+      up: { x: 0, y: -1, angle: -Math.PI / 2 },
+      right: { x: 1, y: 0, angle: 0 },
+      down: { x: 0, y: 1, angle: Math.PI / 2 },
+      left: { x: -1, y: 0, angle: 0, flipX: true },
+    };
+    const direction = directions[pose.knifeFacing] ?? directions[facing] ?? directions.down;
+    const progress = clamp(1 - knifeRemaining / 160, 0, 1);
+    const lunge = 14 + Math.sin(progress * Math.PI) * 12;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.translate(point.x + direction.x * lunge, point.y + direction.y * lunge);
+    ctx.rotate(direction.angle);
+    if (direction.flipX) ctx.scale(-1, 1);
+    ctx.drawImage(COBALTO_KNIFE_SPRITE, -16, -16, 32, 32);
+    ctx.restore();
+    return;
+  }
+  if (
+    now < (remote.poseShootUntil ?? 0) && !pose.knife &&
+    REGOLITO_GUN_SPRITE.complete && REGOLITO_GUN_SPRITE.naturalWidth >= 16
+  ) {
+    const placement = SURFACE_GUN_PLACEMENTS[facing] ?? SURFACE_GUN_PLACEMENTS.down;
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    ctx.translate(point.x + placement.x, point.y + placement.y);
+    ctx.rotate(placement.rotation);
+    if (placement.flipX) ctx.scale(-1, 1);
+    ctx.drawImage(REGOLITO_GUN_SPRITE, -24, -12, 48, 24);
+    ctx.restore();
+  }
+}
+
 function drawRemotePlayersSurface(planetName) {
   if (!multiplayerReady) return;
-  for (const remote of multiplayerPlayers) {
-    if (remote.scene !== 'surface' || remote.planet?.toLowerCase() !== planetName.toLowerCase()) continue;
+  const onPlanet = multiplayerPlayers.filter((remote) =>
+    remote.scene === 'surface' && remote.planet?.toLowerCase() === planetName.toLowerCase()
+  );
+  // Hoverboards que los demás dejaron en el suelo.
+  for (const remote of onPlanet) {
+    const groundBoard = remote.pose?.groundBoard;
+    if (!groundBoard) continue;
+    const boardPoint = getSurfaceRenderPoint(groundBoard.x * SURFACE_WORLD_SIZE, groundBoard.y * SURFACE_WORLD_SIZE);
+    const tintedBoard = getHoverboardFrame(HOVERBOARD_GROUND_SPRITE, 0, remote.hue || 120);
+    ctx.save();
+    ctx.imageSmoothingEnabled = false;
+    if (tintedBoard) {
+      ctx.drawImage(tintedBoard, boardPoint.x - 32, boardPoint.y - 24, 64, 48);
+    } else if (HOVERBOARD_GROUND_SPRITE.complete && HOVERBOARD_GROUND_SPRITE.naturalWidth > 0) {
+      ctx.drawImage(HOVERBOARD_GROUND_SPRITE, boardPoint.x - 32, boardPoint.y - 24, 64, 48);
+    }
+    ctx.restore();
+  }
+  for (const remote of onPlanet) {
     const surfaceX = (Number.isFinite(remote.drawSurfaceX) ? remote.drawSurfaceX : 0.5) * SURFACE_WORLD_SIZE;
     const surfaceY = (Number.isFinite(remote.drawSurfaceY) ? remote.drawSurfaceY : 0.5) * SURFACE_WORLD_SIZE;
-    const hasSprite = drawNpcSprite(surfaceX, surfaceY, remote.hue || 120, remote.facing, remote.animationFrame || 1);
+    const surfacePoint = getSurfaceRenderPoint(surfaceX, surfaceY);
+    const hasSprite = drawRemoteSurfaceBody(remote, surfaceX, surfaceY, surfacePoint);
     if (!hasSprite) {
-      const surfacePoint = getSurfaceRenderPoint(surfaceX, surfaceY);
       ctx.fillStyle = '#73eaff';
       ctx.beginPath();
       ctx.arc(surfacePoint.x, surfacePoint.y, 8, 0, Math.PI * 2);
       ctx.fill();
     }
+    drawRemoteSurfaceWeapon(remote, surfacePoint);
     drawWorldText(remote.name || 'PILOTO', surfaceX, surfaceY - PLAYER_SPRITE_SIZE / 2 - 8, '#9df4ff', false, WORLD_FONT_SIZE / 1.5);
     if (remote.chat) drawSpeechBubble(remote.chat, surfaceX, surfaceY - PLAYER_SPRITE_SIZE / 2 - 14, '#72eaff', '#e3fbff');
   }
@@ -10381,7 +10457,7 @@ function drawSurfaceScene() {
     ctx.restore();
   }
   const playerSpriteHalfHeight = game.player.hoverboardEquipped ? 24 : PLAYER_SPRITE_SIZE / 2;
-  drawWorldText(multiplayerName, game.surface.x, game.surface.y - playerSpriteHalfHeight - 8, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
+  drawWorldText('JUGADOR', game.surface.x, game.surface.y - playerSpriteHalfHeight - 8, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
   drawPlayerChatBubble(
     game.surface.x,
     game.surface.y - playerSpriteHalfHeight - WORLD_FONT_SIZE / 1.5 - 18
@@ -10766,7 +10842,7 @@ function draw() {
   drawEmergencyServiceShip();
   drawRemoteSpaceLabels();
   drawEnemyEdgeIndicators();
-  drawWorldText(multiplayerName, game.width / 2, game.height / 2 - 22, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
+  drawWorldText('JUGADOR', game.width / 2, game.height / 2 - 22, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
   drawPlayerChatBubble(game.width / 2, game.height / 2 - 34);
   drawRadar();
   drawSpaceFrame();
@@ -11444,10 +11520,6 @@ pauseMenu.addEventListener('wheel', (event) => event.stopPropagation(), { passiv
 applyHudScale();
 
 function frame(timestamp) {
-  if (!accountReady) {
-    requestAnimationFrame(frame);
-    return;
-  }
   const delta = Math.min((timestamp - game.lastTime) / 1000 || 0.016, 0.032);
   game.lastTime = timestamp;
 
@@ -11476,7 +11548,6 @@ function frame(timestamp) {
 }
 
 window.addEventListener('keydown', (event) => {
-  if (authGate && !authGate.hidden) return;
   const key = event.key.toLowerCase();
 
   if (earthWandererDialogOpen) {
@@ -11677,7 +11748,6 @@ marketPanel.addEventListener('click', (event) => {
 });
 
 window.addEventListener('keyup', (event) => {
-  if (authGate && !authGate.hidden) return;
   game.keys[event.key.toLowerCase()] = false;
 });
 
@@ -12047,45 +12117,45 @@ closeInventoryBtn.addEventListener('click', () => toggleInventory(false));
 window.addEventListener('pagehide', saveGameState);
 window.addEventListener('beforeunload', saveGameState);
 
-let gameStartedForAccount = false;
-function startGameForAccount() {
-  if (gameStartedForAccount || !GAME_SAVE_KEY) return;
-  gameStartedForAccount = true;
-  updateVisibleChunks();
-  updatePlanetPositions();
-  resizeCanvas();
-  window.addEventListener('resize', resizeCanvas);
-  const savedGameState = loadGameState();
-  const restoredGameState = Boolean(savedGameState && restoreGameState(savedGameState));
-  let newGameHomeworld = null;
-  if (!restoredGameState) {
-    const homeworld = game.planets.find((planet) => planet.isHomeworld);
-    if (homeworld) {
-      newGameHomeworld = homeworld;
-      game.selectedPlanet = homeworld;
-      game.player.x = homeworld.x + homeworld.radius + 8;
-      game.player.y = homeworld.y;
-      updateVisibleChunks();
-      updatePlanetPositions();
-    }
+updateVisibleChunks();
+updatePlanetPositions();
+resizeCanvas();
+window.addEventListener('resize', resizeCanvas);
+const savedGameState = loadGameState();
+const restoredGameState = Boolean(savedGameState && restoreGameState(savedGameState));
+let newGameHomeworld = null;
+if (!restoredGameState) {
+  const homeworld = game.planets.find((planet) => planet.isHomeworld);
+  if (homeworld) {
+    newGameHomeworld = homeworld;
+    game.selectedPlanet = homeworld;
+    game.player.x = homeworld.x + homeworld.radius + 8;
+    game.player.y = homeworld.y;
+    updateVisibleChunks();
+    updatePlanetPositions();
   }
-  if (!restoredGameState || savedGameState.fuelBonusGranted !== true) {
-    addResourceToInventory('fuel', 10);
-  }
-  if (newGameHomeworld) enterPlanet(newGameHomeworld);
-  game.selectedPlanet = game.scene === 'surface' ? game.surface.planet : getNearestPlanet();
-  if (currentInventoryView === 'market' && (game.scene !== 'surface' || !isHomeworld(game.surface.planet))) {
-    currentInventoryView = lastInventoryTab;
-  }
-  updateHud();
-  applyInventoryWindowGeometry();
-  if (!inventoryPanel.hidden) {
-    applyInventoryScrollPositions();
-    showInventoryView(currentInventoryView);
-  }
-  setMessage(game.scene === 'surface' ? game.surface.planet.name : 'Espacio');
-  saveGameStateIfDue();
 }
-
-if (!multiplayerEndpoint) startGameForAccount();
+if (!restoredGameState || savedGameState.fuelBonusGranted !== true) {
+  addResourceToInventory('fuel', 10);
+}
+if (newGameHomeworld) {
+  enterPlanet(newGameHomeworld);
+}
+game.selectedPlanet = game.scene === 'surface'
+  ? game.surface.planet
+  : getNearestPlanet();
+if (
+  currentInventoryView === 'market' &&
+  (game.scene !== 'surface' || !isHomeworld(game.surface.planet))
+) {
+  currentInventoryView = lastInventoryTab;
+}
+updateHud();
+applyInventoryWindowGeometry();
+if (!inventoryPanel.hidden) {
+  applyInventoryScrollPositions();
+  showInventoryView(currentInventoryView);
+}
+setMessage(game.scene === 'surface' ? game.surface.planet.name : 'Espacio');
+saveGameStateIfDue();
 requestAnimationFrame(frame);
