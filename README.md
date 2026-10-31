@@ -18,6 +18,8 @@ http://localhost:8000
 
 Otra persona conectada a la misma red Wi-Fi debe abrir `http://IP-DE-ESTA-PC:8000`. La conexión sincroniza las naves, los jugadores, el chat, los NPC y los recursos del suelo en cada planeta. El inventario, las misiones, los enemigos y la economía siguen siendo locales en esta primera versión.
 
+El juego en línea requiere una cuenta: inicia sesión o regístrate en la pantalla inicial. Pulsa `Esc` en cualquier momento para cerrar sesión.
+
 ## Contenido
 
 - Interfaz con fuente pixel art Press Start 2P, incluida localmente bajo licencia SIL Open Font License
@@ -30,6 +32,8 @@ Otra persona conectada a la misma red Wi-Fi debe abrir `http://IP-DE-ESTA-PC:800
 - Sistemas estelares adicionales y agujeros negros poco frecuentes
 - Planetas renderizados en pixel art cuadrado 16×16, sin deformar su proporción; las superficies son lisas y usan verde para Tierra y el color propio de cada otro planeta
 - Nave centrada en cámara, con aceleración, inercia, frenado gradual y orientación según el movimiento
+- En multijugador se comparten el color elegido, los disparos visibles y los impactos entre jugadores en el mismo planeta o en el espacio
+- El juego en línea pide iniciar sesión o crear una cuenta; `Esc` cierra la sesión
 - Aterrizaje automático al alcanzar un planeta con el autopiloto; Enter también permite aterrizar manualmente o despegar
 - La última ubicación se guarda localmente, incluso si se cierra el juego mientras se está en la superficie de un planeta
 - La superficie muestra el suelo liso, la nave modular equipada y el sprite direccional del jugador; cada orientación tiene cuatro cuadros de animación, el cuadro 2 se usa al estar quieto, y para moverse usa la celda azul para arriba, la roja para abajo y la verde para izquierda, que se voltea para mirar a la derecha
@@ -86,7 +90,6 @@ El menú del jugador muestra las opciones de Objetos, Mapa y Nave, junto al cont
 
 Se puede expandir con:
 
-- login y guardado de progreso
 - sistema de comercio entre jugadores
 - más planetas y misiones
 - backend con Python + Flask/FastAPI

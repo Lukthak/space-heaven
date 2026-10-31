@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SpaceHeaven</title>
-    <link rel="stylesheet" href="style.css?v=emergency-help-3" />
+    <link rel="stylesheet" href="style.css?v=multiplayer-auth-1" />
     <style>
       .radio-panel { box-sizing: border-box; width: 100%; max-height: 54vh; overflow-y: auto; padding: 12px; color: #7dffa2; background: #020804; border: 1px solid #14522c; font-family: inherit; font-size: 13px; }
       .radio-panel * { font-size: 13px !important; }
@@ -27,6 +27,26 @@
     <main class="game-shell">
       <canvas id="gameCanvas" width="800" height="800" aria-label="Mundo de SpaceHeaven"></canvas>
       <div id="multiplayerStatus" class="multiplayer-status" aria-live="polite" hidden></div>
+      <div id="accountControls" class="account-controls" hidden>
+        <span id="accountName"></span>
+        <button id="logoutButton" type="button">Cerrar sesión · Esc</button>
+      </div>
+      <section id="authGate" class="auth-gate" aria-labelledby="authTitle">
+        <form id="authForm" class="auth-card" autocomplete="on">
+          <span class="auth-mark">SPACEHEAVEN ONLINE</span>
+          <h1 id="authTitle">Inicia sesión</h1>
+          <p id="authDescription">Inicia sesión o crea una cuenta para jugar en línea.</p>
+          <label class="auth-field" for="authUsername">Usuario
+            <input id="authUsername" name="username" type="text" minlength="3" maxlength="24" required autocomplete="username" />
+          </label>
+          <label class="auth-field" for="authPassword">Contraseña
+            <input id="authPassword" name="password" type="password" minlength="8" maxlength="256" required autocomplete="current-password" />
+          </label>
+          <button id="authSubmit" class="auth-submit" type="submit">Iniciar sesión</button>
+          <button id="authToggle" class="auth-toggle" type="button">¿No tienes cuenta? Regístrate</button>
+          <p id="authMessage" class="auth-error" role="status" aria-live="polite" hidden></p>
+        </form>
+      </section>
       <div id="fuelEmergencyNotice" class="fuel-emergency-notice" role="alert" hidden>¡SIN COMBUSTIBLE! Abre el inventario y entra en ¡Ayuda!</div>
       <div id="message" class="message" role="status" aria-live="polite"></div>
       <div id="shipAbilities" class="ship-abilities" aria-label="Habilidades de la nave" hidden>
@@ -165,6 +185,6 @@
     </main>
 
     <div id="inventoryTooltip" class="inventory-tooltip" role="tooltip" hidden></div>
-    <script src="app.js?v=hoverboard-weapons-5"></script>
+    <script src="app.js?v=multiplayer-auth-color-pvp-2"></script>
   </body>
 </html>

@@ -11,7 +11,7 @@ import threading
 import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent
 PLAYER_TTL_SECONDS = 20
@@ -167,8 +167,10 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             return super().do_GET()
 
         account = authenticated_user(self)
-        guest_id = parse_qs(parsed.query).get("self", [""])[0]
-        self_id = account["id"] if account else f"guest:{guest_id}"
+        if not account:
+            self.send_json(401, {"error": "Inicia sesión para jugar en línea."})
+            return
+        self_id = account["id"]
         now = time.time()
         with STATE_LOCK:
             prune_stale_players(now)
@@ -185,8 +187,23 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlsplit(self.path).path
-        if route not in ("/api/players", "/api/auth/register", "/api/auth/login"):
+        if route not in ("/api/players", "/api/auth/register", "/api/auth/login", "/api/auth/logout"):
             self.send_json(404, {"error": "not found"})
+            return
+        if route == "/api/auth/logout":
+            authorization = self.headers.get("Authorization", "")
+            account = authenticated_user(self)
+            if not account:
+                self.send_json(401, {"error": "Sesión vencida. Inicia sesión otra vez."})
+                return
+            token_hash = hashlib.sha256(authorization[7:].encode()).hexdigest()
+            with AUTH_LOCK:
+                ACCOUNTS["sessions"].pop(token_hash, None)
+                save_accounts(ACCOUNTS)
+            with STATE_LOCK:
+                PLAYERS.pop(account["id"], None)
+                prune_stale_players(time.time())
+            self.send_json(200, {"ok": True})
             return
         try:
             size = int(self.headers.get("Content-Length", "0"))
@@ -233,17 +250,12 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 self.send_json(400, {"error": "invalid player snapshot"})
                 return
             account = authenticated_user(self)
-            if account:
-                player_id = account["id"]
-                snapshot["id"] = player_id
-                snapshot["name"] = account["username"]
-            else:
-                guest_id = str(snapshot.get("id", "")).strip()
-                if not guest_id or len(guest_id) > 128:
-                    self.send_json(400, {"error": "invalid player snapshot"})
-                    return
-                player_id = f"guest:{guest_id}"
-                snapshot["id"] = player_id
+            if not account:
+                self.send_json(401, {"error": "Inicia sesión para jugar en línea."})
+                return
+            player_id = account["id"]
+            snapshot["id"] = player_id
+            snapshot["name"] = account["username"]
         except (ValueError, json.JSONDecodeError):
             self.send_json(400, {"error": "invalid JSON"})
             return

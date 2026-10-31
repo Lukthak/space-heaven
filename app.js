@@ -7,6 +7,18 @@ const messageEl = document.getElementById('message');
 const chatComposer = document.getElementById('chatComposer');
 const chatInput = document.getElementById('chatInput');
 const multiplayerStatus = document.getElementById('multiplayerStatus');
+const authGate = document.getElementById('authGate');
+const authForm = document.getElementById('authForm');
+const authUsername = document.getElementById('authUsername');
+const authPassword = document.getElementById('authPassword');
+const authTitle = document.getElementById('authTitle');
+const authDescription = document.getElementById('authDescription');
+const authSubmit = document.getElementById('authSubmit');
+const authToggle = document.getElementById('authToggle');
+const authMessage = document.getElementById('authMessage');
+const accountControls = document.getElementById('accountControls');
+const accountName = document.getElementById('accountName');
+const logoutButton = document.getElementById('logoutButton');
 const fuelEmergencyNotice = document.getElementById('fuelEmergencyNotice');
 const emergencyHelpOption = document.getElementById('emergencyHelpOption');
 const emergencyHelpPanel = document.getElementById('emergencyHelpPanel');
@@ -100,7 +112,7 @@ let earthWandererDialogText = '';
 let earthWandererTipIndex = 0;
 let playerChatMessage = '';
 let playerChatMessageUntil = 0;
-const multiplayerPlayerId = (() => {
+let multiplayerPlayerId = (() => {
   const key = 'spaceHeavenMultiplayerId';
   let id = localStorage.getItem(key);
   if (!id) {
@@ -110,10 +122,14 @@ const multiplayerPlayerId = (() => {
   }
   return id;
 })();
-const multiplayerName = `Piloto-${multiplayerPlayerId.slice(0, 4).toUpperCase()}`;
+let multiplayerName = `Piloto-${multiplayerPlayerId.slice(0, 4).toUpperCase()}`;
 let multiplayerPlayers = [];
 let multiplayerReady = false;
 let multiplayerSyncBusy = false;
+let multiplayerSyncRequested = false;
+let authToken = localStorage.getItem('spaceHeaven.authToken') || '';
+let authReady = !/^https?:$/.test(location.protocol);
+let authMode = 'login';
 let multiplayerChatMessage = '';
 let multiplayerChatMessageUntil = 0;
 let multiplayerWorldOwnerId = '';
@@ -123,6 +139,9 @@ let multiplayerWorldRevision = 0;
 let multiplayerAppliedWorldRevision = -1;
 let multiplayerEarthWandererTarget = null;
 let multiplayerMartianTargets = null;
+let multiplayerProjectileSequence = 0;
+const multiplayerCombatEvents = [];
+const processedMultiplayerCombatEvents = new Map();
 const multiplayerSyncedSurfaceEntities = new Set();
 const multiplayerEndpoint = /^https?:$/.test(location.protocol)
   ? `${location.origin}/api/players`
@@ -909,6 +928,35 @@ function getMultiplayerSnapshot() {
   const capsule = game.scene === 'space' && game.emergencyReturn
     ? (game.emergencyReturnCause === 'tow' ? 'tow' : (game.emergencyCapsule?.stage ?? 1))
     : 0;
+  const projectiles = game.scene === 'surface'
+    ? game.surfaceProjectiles.filter((projectile) => projectile.owner === 'player').map((projectile) => {
+      projectile.multiplayerId ??= `${multiplayerPlayerId}:${++multiplayerProjectileSequence}`;
+      return {
+        id: projectile.multiplayerId,
+        scene: 'surface',
+        x: projectile.x / SURFACE_WORLD_SIZE,
+        y: projectile.y / SURFACE_WORLD_SIZE,
+        vx: projectile.vx,
+        vy: projectile.vy,
+        life: projectile.remainingDistance / (Math.hypot(projectile.vx, projectile.vy) || 1),
+      };
+    })
+    : game.playerProjectiles.map((projectile) => {
+      projectile.multiplayerId ??= `${multiplayerPlayerId}:${++multiplayerProjectileSequence}`;
+      return {
+        id: projectile.multiplayerId,
+        scene: 'space',
+        x: projectile.x,
+        y: projectile.y,
+        vx: projectile.vx,
+        vy: projectile.vy,
+        life: projectile.life,
+      };
+    });
+  const now = Date.now();
+  while (multiplayerCombatEvents.length && now - multiplayerCombatEvents[0].createdAt > 10000) {
+    multiplayerCombatEvents.shift();
+  }
   return {
     id: multiplayerPlayerId,
     name: multiplayerName,
@@ -927,6 +975,8 @@ function getMultiplayerSnapshot() {
     shipParts: game.player.shipParts,
     pose,
     capsule,
+    projectiles,
+    combatEvents: multiplayerCombatEvents,
     surfaceWorld,
     collectedPickupIds: [...game.player.collectedPickupIds].slice(-5000),
     chat: Date.now() < multiplayerChatMessageUntil ? multiplayerChatMessage : '',
@@ -934,18 +984,232 @@ function getMultiplayerSnapshot() {
   };
 }
 
-async function syncMultiplayer() {
-  if (!multiplayerEndpoint || multiplayerSyncBusy) return;
+function reportMultiplayerHit(target, scene, damage, x, y, extra = {}) {
+  multiplayerCombatEvents.push({
+    id: `${multiplayerPlayerId}:${Date.now()}:${++multiplayerProjectileSequence}`,
+    targetId: target.id,
+    scene,
+    planet: scene === 'surface' ? game.surface.planet.name : '',
+    damage,
+    x,
+    y,
+    createdAt: Date.now(),
+    ...extra,
+  });
+  if (multiplayerCombatEvents.length > 32) multiplayerCombatEvents.shift();
+}
+
+function getRemoteShipPartSlotAtImpact(remote, x, y) {
+  const dx = x - remote.x;
+  const dy = y - remote.y;
+  const cosine = Math.cos(remote.rotation || 0);
+  const sine = Math.sin(remote.rotation || 0);
+  const localX = dx * cosine + dy * sine;
+  const localY = -dx * sine + dy * cosine;
+  const locations = [
+    ['center', 0, 0],
+    ['propulsor', 0, 6],
+    ['leftWing', -6, 0],
+    ['rightWing', 6, 0],
+    ['tip', 0, -6],
+  ].filter(([slot]) => remote.shipParts?.[slot]);
+  if (!locations.length) return 'center';
+  locations.sort((first, second) =>
+    Math.hypot(localX - first[1], localY - first[2]) - Math.hypot(localX - second[1], localY - second[2])
+  );
+  return locations[0][0];
+}
+
+function applyMultiplayerCombatEvents(players) {
+  const now = Date.now();
+  for (const [eventId, processedAt] of processedMultiplayerCombatEvents) {
+    if (now - processedAt > 15000) processedMultiplayerCombatEvents.delete(eventId);
+  }
+  for (const attacker of players) {
+    for (const event of attacker.combatEvents || []) {
+      if (
+        event.targetId !== multiplayerPlayerId ||
+        !event.id ||
+        processedMultiplayerCombatEvents.has(event.id) ||
+        now - event.createdAt > 10000
+      ) continue;
+      processedMultiplayerCombatEvents.set(event.id, now);
+      if (event.scene === 'surface') {
+        if (
+          game.scene === 'surface' && game.surface &&
+          game.surface.planet.name.toLowerCase() === String(event.planet || '').toLowerCase()
+        ) {
+          damageSurfacePlayer(event.damage || 1);
+        }
+      } else if (event.scene === 'space' && game.scene === 'space') {
+        if (event.capsule && game.emergencyReturn && game.emergencyCapsule?.stage === 1) {
+          damageEmergencyCapsule(event.damage || 1);
+        } else if (!game.emergencyReturn) {
+          const slot = ['center', 'propulsor', 'leftWing', 'rightWing', 'tip'].includes(event.slot)
+            ? event.slot
+            : getShipPartSlotAtImpact(event.x, event.y);
+          const result = slot && damageShipPart(slot, event.damage || 1);
+          if (result) {
+            setCombatMessage(`¡Impacto de otro jugador! ${result.hp}/${result.maxHealth} HP en la nave.`);
+          }
+        }
+      }
+    }
+  }
+}
+
+function setAuthenticationMessage(text, isError = true) {
+  authMessage.textContent = text;
+  authMessage.hidden = !text;
+  authMessage.classList.toggle('auth-error', isError);
+}
+
+function updateAuthenticationMode() {
+  const registering = authMode === 'register';
+  authTitle.textContent = registering ? 'Crear cuenta' : 'Inicia sesión';
+  authDescription.textContent = registering
+    ? 'Elige un usuario y contraseña para crear tu cuenta.'
+    : 'Inicia sesión o crea una cuenta para jugar en línea.';
+  authSubmit.textContent = registering ? 'Crear cuenta' : 'Iniciar sesión';
+  authToggle.textContent = registering ? '¿Ya tienes cuenta? Inicia sesión' : '¿No tienes cuenta? Regístrate';
+  authPassword.autocomplete = registering ? 'new-password' : 'current-password';
+}
+
+function enterAuthenticatedGame(user) {
+  authReady = true;
+  multiplayerPlayerId = user.id;
+  multiplayerName = user.username;
+  localStorage.setItem('spaceHeavenMultiplayerId', user.id);
+  authGate.hidden = true;
+  accountControls.hidden = false;
+  accountName.textContent = user.username;
+  multiplayerStatus.hidden = false;
+  setAuthenticationMessage('');
+  syncMultiplayer(true);
+}
+
+async function initializeAuthentication() {
+  if (!multiplayerEndpoint) {
+    authGate.hidden = true;
+    authReady = true;
+    return;
+  }
+  if (!authToken) return;
+  try {
+    const response = await fetch('/api/auth/me', {
+      headers: { Authorization: `Bearer ${authToken}` },
+      cache: 'no-store',
+    });
+    if (!response.ok) {
+      if (response.status !== 401) throw new Error(`HTTP ${response.status}`);
+      localStorage.removeItem('spaceHeaven.authToken');
+      authToken = '';
+      setAuthenticationMessage('Tu sesión venció. Inicia sesión otra vez.');
+      return;
+    }
+    const result = await response.json();
+    if (!result.user?.id || !result.user?.username) throw new Error('Respuesta de sesión inválida.');
+    enterAuthenticatedGame(result.user);
+  } catch (error) {
+    console.error('No se pudo validar la sesión:', error);
+    setAuthenticationMessage('No se pudo conectar con el servidor. Inténtalo otra vez.');
+  }
+}
+
+authToggle.addEventListener('click', () => {
+  authMode = authMode === 'login' ? 'register' : 'login';
+  authForm.reset();
+  setAuthenticationMessage('');
+  updateAuthenticationMode();
+});
+
+authForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!multiplayerEndpoint) {
+    setAuthenticationMessage('Inicia el servidor para jugar en línea.');
+    return;
+  }
+  authSubmit.disabled = true;
+  setAuthenticationMessage('Conectando…', false);
+  try {
+    const route = authMode === 'register' ? 'register' : 'login';
+    const response = await fetch(`/api/auth/${route}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: authUsername.value.trim(), password: authPassword.value }),
+      cache: 'no-store',
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    if (!result.token || !result.user?.id || !result.user?.username) {
+      throw new Error('El servidor devolvió una sesión inválida.');
+    }
+    authToken = result.token;
+    localStorage.setItem('spaceHeaven.authToken', authToken);
+    enterAuthenticatedGame(result.user);
+  } catch (error) {
+    console.error('No se pudo iniciar sesión:', error);
+    setAuthenticationMessage(error.message || 'No se pudo iniciar sesión.');
+  } finally {
+    authSubmit.disabled = false;
+  }
+});
+
+async function logout() {
+  if (!authReady || !authToken) return;
+  const token = authToken;
+  authReady = false;
+  authToken = '';
+  localStorage.removeItem('spaceHeaven.authToken');
+  accountControls.hidden = true;
+  authGate.hidden = false;
+  multiplayerPlayers = [];
+  multiplayerReady = false;
+  game.keys = {};
+  closePauseMenu();
+  multiplayerStatus.hidden = true;
+  authForm.reset();
+  setAuthenticationMessage('Sesión cerrada.', false);
+  if (!inventoryPanel.hidden) toggleInventory(false);
+  try {
+    const response = await fetch('/api/auth/logout', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store',
+    });
+    if (!response.ok && response.status !== 401) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+  } catch (error) {
+    console.error('No se pudo invalidar la sesión en el servidor:', error);
+  }
+  authMode = 'login';
+  updateAuthenticationMode();
+  authUsername.focus();
+}
+
+logoutButton.addEventListener('click', logout);
+
+async function syncMultiplayer(force = false) {
+  if (!multiplayerEndpoint || !authReady || !authToken) return;
+  if (multiplayerSyncBusy) {
+    multiplayerSyncRequested ||= force;
+    return;
+  }
   multiplayerSyncBusy = true;
   try {
     const response = await fetch(multiplayerEndpoint, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+      },
       body: JSON.stringify(getMultiplayerSnapshot()),
       cache: 'no-store',
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const peersResponse = await fetch(`${multiplayerEndpoint}?self=${encodeURIComponent(multiplayerPlayerId)}`, {
+      headers: { Authorization: `Bearer ${authToken}` },
       cache: 'no-store',
     });
     if (!peersResponse.ok) throw new Error(`HTTP ${peersResponse.status}`);
@@ -976,6 +1240,7 @@ async function syncMultiplayer() {
         drawSurfaceY: sameLocation ? (previous.drawSurfaceY ?? previous.surfaceY) : player.surfaceY,
       };
     }) : [];
+    applyMultiplayerCombatEvents(multiplayerPlayers);
     multiplayerReady = true;
     const count = multiplayerPlayers.length;
     multiplayerStatus.textContent = count ? `EN LÍNEA · ${count + 1} JUGADORES` : 'EN LÍNEA · ESPERANDO JUGADORES';
@@ -989,13 +1254,20 @@ async function syncMultiplayer() {
     multiplayerStatus.classList.remove('multiplayer-online');
   } finally {
     multiplayerSyncBusy = false;
+    if (multiplayerSyncRequested) {
+      multiplayerSyncRequested = false;
+      window.setTimeout(() => syncMultiplayer(), 0);
+    }
   }
 }
 
 if (multiplayerEndpoint) {
-  multiplayerStatus.hidden = false;
-  window.setTimeout(syncMultiplayer, 0);
+  multiplayerStatus.hidden = true;
+  initializeAuthentication();
   window.setInterval(syncMultiplayer, 90);
+} else {
+  authGate.hidden = true;
+  authReady = true;
 }
 
 function updateMultiplayerInterpolation(dt) {
@@ -3343,6 +3615,13 @@ function drawShipParts(context, centerX, centerY, tileSize, parts = game.player.
   context.restore();
 }
 
+function drawPlayerShipParts(context, centerX, centerY, tileSize, parts, hue, healthBySlot = null) {
+  context.save();
+  context.filter = `hue-rotate(${hue - PLAYER_CLOTHES_HUE}deg)`;
+  drawShipParts(context, centerX, centerY, tileSize, parts, healthBySlot);
+  context.restore();
+}
+
 function drawShipPreview() {
   shipPreviewContext.clearRect(0, 0, shipPreviewCanvas.width, shipPreviewCanvas.height);
   drawShipParts(
@@ -5372,6 +5651,8 @@ function fireSurfaceGun(facing = game.surface?.facing) {
   const gunPlacement = SURFACE_GUN_PLACEMENTS[facing] ?? SURFACE_GUN_PLACEMENTS.down;
   game.surfaceProjectiles.push({
     owner: 'player',
+    multiplayerId: `${multiplayerPlayerId}:${++multiplayerProjectileSequence}`,
+    hitPlayers: new Set(),
     damage: 1,
     x: wrapSurfaceCoordinate(game.surface.x + gunPlacement.x + direction.x * 27),
     y: wrapSurfaceCoordinate(game.surface.y + gunPlacement.y + direction.y * 27),
@@ -5684,6 +5965,7 @@ function renderShipWorkshop() {
   slider.addEventListener('input', () => {
     game.player.hue = Number(slider.value);
     paintSwatch();
+    syncMultiplayer(true);
   });
   slider.addEventListener('change', saveGameState);
   colorRow.append(swatch, slider);
@@ -8435,6 +8717,7 @@ function updatePlayerWeapon(dt, controlsEnabled) {
       const side = shotCount > 1 ? (shot === 0 ? -1 : 1) : 0;
       const isHomingShot = centerHomingActive && game.player.centerHoming.shotsRemaining > 0;
       game.playerProjectiles.push({
+        multiplayerId: `${multiplayerPlayerId}:${++multiplayerProjectileSequence}`,
         x: game.player.x + directionX * muzzleDistance + sideX * side,
         y: game.player.y + directionY * muzzleDistance + sideY * side,
         vx: directionX * projectileSpeed,
@@ -8446,6 +8729,7 @@ function updatePlayerWeapon(dt, controlsEnabled) {
         homingUntil: game.time + CENTER_HOMING_DURATION,
         pierce: Boolean(tip.stats?.weaponPierce),
         hitDrones: tip.stats?.weaponPierce ? new Set() : null,
+        hitPlayers: new Set(),
       });
       if (isHomingShot) game.player.centerHoming.shotsRemaining -= 1;
     }
@@ -8502,6 +8786,24 @@ function updatePlayerWeapon(dt, controlsEnabled) {
         break;
       }
     }
+    let hitRemote = null;
+    if (hitIndex < 0 && multiplayerReady) {
+      hitRemote = multiplayerPlayers.find((remote) =>
+        remote.scene === 'space' &&
+        remote.capsule !== 2 &&
+        !projectile.hitPlayers?.has(remote.id) &&
+        distanceToSegment(remote.drawX, remote.drawY, previousX, previousY, projectile.x, projectile.y) <= 13
+      ) ?? null;
+      if (hitRemote) {
+        const capsule = hitRemote.capsule === 1;
+        const slot = capsule ? null : getRemoteShipPartSlotAtImpact(hitRemote, projectile.x, projectile.y);
+        reportMultiplayerHit(hitRemote, 'space', projectile.damage, projectile.x, projectile.y, {
+          capsule,
+          slot,
+        });
+        projectile.hitPlayers?.add(hitRemote.id);
+      }
+    }
     if (hitIndex >= 0) {
       if (!projectile.pierce || projectile.life <= 0) game.playerProjectiles.splice(index, 1);
       const hitDrone = game.hostileDrones[hitIndex];
@@ -8511,6 +8813,9 @@ function updatePlayerWeapon(dt, controlsEnabled) {
       } else {
         setPlayerDamageMessage(`¡Impacto! ${projectile.damage} de daño a la nave enemiga · ${Math.ceil(hitDrone.hp)}/${hitDrone.stats.maxHealth} HP.`);
       }
+    } else if (hitRemote && !projectile.pierce) {
+      game.playerProjectiles.splice(index, 1);
+      setPlayerDamageMessage(`¡Impacto en ${hitRemote.name || 'otro jugador'}!`);
     } else if (projectile.life <= 0) {
       game.playerProjectiles.splice(index, 1);
     }
@@ -8668,9 +8973,10 @@ function drawHostileCombat() {
     const screenY = projectile.y - game.player.y + game.height / 2;
     const speed = Math.hypot(projectile.vx, projectile.vy) || 1;
     ctx.save();
-    drawProjectileHalo(screenX, screenY, projectile, 'rgba(255, 194, 71, 0.5)', 10);
-    ctx.strokeStyle = '#fff4a3';
-    ctx.shadowColor = '#ffc247';
+    const color = `hsl(${game.player.hue}, 100%, 68%)`;
+    drawProjectileHalo(screenX, screenY, projectile, color, 10);
+    ctx.strokeStyle = '#ffffff';
+    ctx.shadowColor = color;
     ctx.shadowBlur = 7;
     ctx.lineWidth = 2;
     ctx.beginPath();
@@ -8685,6 +8991,30 @@ function drawRemotePlayersSpace() {
   if (!multiplayerReady) return;
   for (const remote of multiplayerPlayers) {
     if (remote.scene !== 'space') continue;
+    const age = Math.max(0, Math.min(0.18, (Date.now() - (remote.sentAt || Date.now())) / 1000));
+    for (const projectile of remote.projectiles || []) {
+      if (projectile.scene !== 'space' || age > projectile.life) continue;
+      const x = projectile.x + projectile.vx * age;
+      const y = projectile.y + projectile.vy * age;
+      const screenX = x - game.player.x + game.width / 2;
+      const screenY = y - game.player.y + game.height / 2;
+      const speed = Math.hypot(projectile.vx, projectile.vy) || 1;
+      const color = `hsl(${Number.isFinite(remote.hue) ? remote.hue : 120}, 100%, 68%)`;
+      ctx.save();
+      drawProjectileHalo(screenX, screenY, projectile, color, 10);
+      ctx.strokeStyle = '#ffffff';
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 8;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(screenX - (projectile.vx / speed) * 10, screenY - (projectile.vy / speed) * 10);
+      ctx.lineTo(screenX, screenY);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+  for (const remote of multiplayerPlayers) {
+    if (remote.scene !== 'space') continue;
     const screenX = remote.drawX - game.player.x + game.width / 2;
     const screenY = remote.drawY - game.player.y + game.height / 2;
     if (screenX < -100 || screenX > game.width + 100 || screenY < -100 || screenY > game.height + 100) continue;
@@ -8693,7 +9023,7 @@ function drawRemotePlayersSpace() {
     ctx.rotate(remote.rotation || 0);
     if (remote.capsule) {
       if (remote.capsule === 'tow') {
-        drawShipParts(ctx, 0, 0, 6, remote.shipParts);
+        drawPlayerShipParts(ctx, 0, 0, 6, remote.shipParts, Number.isFinite(remote.hue) ? remote.hue : 120);
         ctx.fillStyle = '#55e8ff';
         ctx.strokeStyle = '#d8fbff';
         ctx.lineWidth = 1;
@@ -8736,9 +9066,9 @@ function drawRemotePlayersSpace() {
       const flameLength = clamp(4 + speed * 0.02, 4, 48);
       drawFlexibleThrusterFlame(ctx, flameLength, '#70eaff', clamp(speed / 18, 0, 1), 0);
     }
-    ctx.shadowColor = '#65eaff';
+    ctx.shadowColor = `hsl(${Number.isFinite(remote.hue) ? remote.hue : 120}, 100%, 70%)`;
     ctx.shadowBlur = 8;
-    drawShipParts(ctx, 0, 0, 6, remote.shipParts);
+    drawPlayerShipParts(ctx, 0, 0, 6, remote.shipParts, Number.isFinite(remote.hue) ? remote.hue : 120);
     ctx.restore();
   }
 }
@@ -8746,7 +9076,7 @@ function drawRemotePlayersSpace() {
 // Dibuja el cuerpo de un jugador remoto con la misma pose que ve él: inventario, hoverboard, disparo o caminando.
 function drawRemoteSurfaceBody(remote, surfaceX, surfaceY, point) {
   const pose = remote.pose || {};
-  const hue = remote.hue || 120;
+  const hue = Number.isFinite(remote.hue) ? remote.hue : 120;
   const facing = remote.facing || 'down';
   const now = Date.now();
   const knifeActive = Boolean(pose.knife) || now < (remote.poseKnifeUntil ?? 0);
@@ -8844,12 +9174,37 @@ function drawRemotePlayersSurface(planetName) {
   const onPlanet = multiplayerPlayers.filter((remote) =>
     remote.scene === 'surface' && remote.planet?.toLowerCase() === planetName.toLowerCase()
   );
+  for (const remote of onPlanet) {
+    const age = Math.max(0, Math.min(0.18, (Date.now() - (remote.sentAt || Date.now())) / 1000));
+    for (const projectile of remote.projectiles || []) {
+      if (projectile.scene !== 'surface' || age > projectile.life) continue;
+      const x = wrapSurfaceCoordinate(projectile.x * SURFACE_WORLD_SIZE + projectile.vx * age);
+      const y = wrapSurfaceCoordinate(projectile.y * SURFACE_WORLD_SIZE + projectile.vy * age);
+      const point = getSurfaceRenderPoint(x, y);
+      const angle = Math.atan2(projectile.vy, projectile.vx);
+      const color = `hsl(${Number.isFinite(remote.hue) ? remote.hue : 120}, 100%, 68%)`;
+      ctx.save();
+      ctx.translate(point.x, point.y);
+      ctx.rotate(angle);
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(-4, -2, 8, 4);
+      ctx.fillStyle = color;
+      ctx.fillRect(-3, -1, 5, 2);
+      ctx.restore();
+    }
+  }
   // Hoverboards que los demás dejaron en el suelo.
   for (const remote of onPlanet) {
     const groundBoard = remote.pose?.groundBoard;
     if (!groundBoard) continue;
     const boardPoint = getSurfaceRenderPoint(groundBoard.x * SURFACE_WORLD_SIZE, groundBoard.y * SURFACE_WORLD_SIZE);
-    const tintedBoard = getHoverboardFrame(HOVERBOARD_GROUND_SPRITE, 0, remote.hue || 120);
+    const tintedBoard = getHoverboardFrame(
+      HOVERBOARD_GROUND_SPRITE,
+      0,
+      Number.isFinite(remote.hue) ? remote.hue : 120
+    );
     ctx.save();
     ctx.imageSmoothingEnabled = false;
     if (tintedBoard) {
@@ -9183,6 +9538,27 @@ function update(dt) {
         if (isMars(game.surface.planet) && isMarsMountainCellBlocked(projectile.x, projectile.y)) {
           hitMountain = true;
           break;
+        }
+        if (projectile.owner === 'player' && multiplayerReady) {
+          const target = multiplayerPlayers.find((remote) =>
+            remote.scene === 'surface' &&
+            remote.planet?.toLowerCase() === game.surface.planet.name.toLowerCase() &&
+            (!projectile.hitPlayers || !projectile.hitPlayers.has(remote.id)) &&
+            getSurfaceDistance(
+              projectile.x,
+              projectile.y,
+              (remote.drawSurfaceX ?? remote.surfaceX ?? 0.5) * SURFACE_WORLD_SIZE,
+              (remote.drawSurfaceY ?? remote.surfaceY ?? 0.5) * SURFACE_WORLD_SIZE
+            ) <= PLAYER_SPRITE_SIZE / 2
+          );
+          if (target) {
+            projectile.hitPlayers ??= new Set();
+            projectile.hitPlayers.add(target.id);
+            reportMultiplayerHit(target, 'surface', projectile.damage ?? 1, projectile.x, projectile.y);
+            hitTarget = true;
+            setCombatMessage(`¡Impacto en ${target.name || 'otro jugador'}!`);
+            break;
+          }
         }
         if (projectile.owner === 'martian' &&
           getSurfaceDistance(projectile.x, projectile.y, surf.x, surf.y) <= PLAYER_SPRITE_SIZE / 2) {
@@ -9876,7 +10252,7 @@ function drawPlayer() {
 
   if (game.emergencyReturn) {
     if (game.emergencyReturnCause === 'tow') {
-      drawShipParts(ctx, 0, 0, 6, game.player.shipParts, ensureShipPartHealth());
+      drawPlayerShipParts(ctx, 0, 0, 6, game.player.shipParts, game.player.hue, ensureShipPartHealth());
       ctx.fillStyle = '#55e8ff';
       ctx.strokeStyle = '#d8fbff';
       ctx.lineWidth = 1;
@@ -9933,9 +10309,9 @@ function drawPlayer() {
     const flameOpacity = clamp(velocity / 18, 0, 1);
     drawFlexibleThrusterFlame(ctx, flameLength, flameColor, flameOpacity, game.player.flameBend);
   }
-  ctx.shadowColor = 'rgba(255, 255, 255, 0.9)';
+  ctx.shadowColor = `hsl(${game.player.hue}, 100%, 72%)`;
   ctx.shadowBlur = 7;
-  drawShipParts(ctx, 0, 0, 6, game.player.shipParts, ensureShipPartHealth());
+  drawPlayerShipParts(ctx, 0, 0, 6, game.player.shipParts, game.player.hue, ensureShipPartHealth());
   if (game.player.muzzleFlashUntil > Date.now()) {
     drawMuzzleFlash(ctx, 0, -12, game.player.muzzleFlashShape);
   }
@@ -10450,9 +10826,12 @@ function drawSurfaceScene() {
     ctx.translate(projectile.x, projectile.y);
     ctx.rotate(Math.atan2(projectile.vy, projectile.vx));
     const hostileProjectile = projectile.owner === 'martian';
-    ctx.fillStyle = hostileProjectile ? '#ffd2d7' : '#fff5bc';
+    const playerProjectileColor = `hsl(${game.player.hue}, 100%, 68%)`;
+    ctx.shadowColor = hostileProjectile ? '#ff2638' : playerProjectileColor;
+    ctx.shadowBlur = 7;
+    ctx.fillStyle = hostileProjectile ? '#ffd2d7' : '#ffffff';
     ctx.fillRect(-3, -2, 6, 4);
-    ctx.fillStyle = hostileProjectile ? '#ff2638' : '#ffb34a';
+    ctx.fillStyle = hostileProjectile ? '#ff2638' : playerProjectileColor;
     ctx.fillRect(-2, -1, 3, 2);
     ctx.restore();
   }
@@ -11549,6 +11928,18 @@ function frame(timestamp) {
 
 window.addEventListener('keydown', (event) => {
   const key = event.key.toLowerCase();
+
+  if (key === 'escape' && authToken) {
+    event.preventDefault();
+    if (!event.repeat) logout();
+    return;
+  }
+  if (!authReady) {
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(key)) {
+      event.preventDefault();
+    }
+    return;
+  }
 
   if (earthWandererDialogOpen) {
     event.preventDefault();

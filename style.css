@@ -55,9 +55,42 @@
 .auth-toggle { border-color: transparent; background: transparent; color: #81d995; font-size: 8px; }
 .auth-error { color: #ff9292 !important; }
 
+.account-controls {
+  position: absolute;
+  z-index: 3;
+  top: 12px;
+  right: 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid rgba(57, 255, 117, 0.5);
+  background: rgba(0, 5, 2, 0.84);
+  color: #b9ffca;
+  font-size: calc(9px * var(--font-scale));
+}
+
+.account-controls[hidden] { display: none; }
+
+.account-controls button {
+  border: 1px solid #19532c;
+  padding: 6px 8px;
+  background: #06130a;
+  color: #aaffbd;
+  cursor: pointer;
+  font: inherit;
+}
+
+.account-controls button:hover,
+.account-controls button:focus-visible {
+  border-color: var(--terminal-green);
+  outline: none;
+}
+
 @media (max-width: 480px) {
   .auth-card h1 { font-size: 14px; }
   .auth-mark { font-size: 9px; }
+  .account-controls { gap: 5px; padding: 5px; }
 }
 
 html,
