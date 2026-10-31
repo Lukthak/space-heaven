@@ -110,6 +110,7 @@ let earthWandererDialogText = '';
 let earthWandererTipIndex = 0;
 let playerChatMessage = '';
 let playerChatMessageUntil = 0;
+let adminCommandsEnabled = false;
 let multiplayerPlayerId = (() => {
   const key = 'spaceHeavenMultiplayerId';
   let id = localStorage.getItem(key);
@@ -731,6 +732,18 @@ function sendChatMessage(text) {
     closeChatComposer();
     return;
   }
+  if (message.toLowerCase() === '/ilovebeingadmin') {
+    adminCommandsEnabled = true;
+    setMessage('Comandos activados: /repair, /craft, /home, /mision, /mars, /fuel, /regolito, /money, /enemy.');
+    chatInput.value = '';
+    closeChatComposer();
+    return;
+  }
+  if (message.startsWith('/') && !adminCommandsEnabled) {
+    chatInput.value = '';
+    closeChatComposer();
+    return;
+  }
   if (/^\/repair(?:\s|$)/i.test(message)) {
     const health = ensureShipPartHealth();
     for (const slot of Object.keys(SHIP_PART_BASE_HEALTH)) {
@@ -866,7 +879,7 @@ function sendChatMessage(text) {
     return;
   }
   if (message.startsWith('/')) {
-    setMessage('Comando desconocido. Prueba /home, /mars, /enemy, /fuel, /regolito, /money, /mision, /repair o /craft.');
+    setMessage('Comando desconocido.');
     return;
   }
   showPlayerChatMessage(message);
@@ -1242,6 +1255,7 @@ async function logout() {
   authReady = false;
   authToken = '';
   localStorage.removeItem('spaceHeaven.authToken');
+  adminCommandsEnabled = false;
   authGate.hidden = false;
   multiplayerPlayers = [];
   multiplayerReady = false;
