@@ -18,9 +18,9 @@ http://localhost:8000
 
 Otra persona conectada a la misma red Wi-Fi debe abrir `http://IP-DE-ESTA-PC:8000`. La conexión sincroniza las naves, los jugadores, el chat, los NPC y los recursos del suelo en cada planeta.
 
-El juego en línea requiere una cuenta: inicia sesión o regístrate en la pantalla inicial. La posición, el inventario y el progreso se guardan por cuenta en el servidor y se recuperan al iniciar sesión. Si la cuenta todavía no tiene una partida remota, se migra su guardado local una sola vez. Pulsa `Esc` para abrir sobre la partida el menú negro con las opciones `Reanudar`, `Pantalla completa: Sí/No` y `Cerrar sesión`; el mundo sigue avanzando detrás del menú.
+El juego en línea requiere una cuenta: inicia sesión o regístrate en la pantalla inicial. La posición, el inventario y el progreso del personaje se guardan por cuenta en el servidor y se recuperan al iniciar sesión; una cuenta nueva empieza una partida independiente y no toma la posición local de otra cuenta. El mundo de cada planeta —incluidos los tiles, objetos del suelo y enemigos y NPC que se mueven— se comparte entre jugadores y conserva una única posición por entidad. Los objetos que recoge un jugador desaparecen también para los demás. Los nombres de usuario aparecen encima de cada jugador, en amarillo para los demás pilotos. Pulsa `Esc` para abrir sobre la partida el menú negro con las opciones `Reanudar`, `Pantalla completa: Sí/No` y `Cerrar sesión`; el mundo sigue avanzando detrás del menú.
 
-El servidor guarda las cuentas y las partidas en `data/` (o en la ruta indicada por `SPACEHEAVEN_DATA_DIR`). En un hosting con disco efímero, configura un disco persistente y apunta `SPACEHEAVEN_DATA_DIR` a su punto de montaje para conservar los datos después de reinicios o despliegues.
+El servidor guarda las cuentas, las partidas y los mundos compartidos en `data/` (o en la ruta indicada por `SPACEHEAVEN_DATA_DIR`). En un hosting con disco efímero, configura un disco persistente y apunta `SPACEHEAVEN_DATA_DIR` a su punto de montaje para conservar los datos después de reinicios o despliegues.
 
 ## Contenido
 

@@ -133,12 +133,15 @@ let authMode = 'login';
 let multiplayerChatMessage = '';
 let multiplayerChatMessageUntil = 0;
 let multiplayerWorldOwnerId = '';
+let multiplayerWorldOwnerPlanetKey = '';
 let multiplayerIsWorldOwner = false;
+let multiplayerWorldNeedsAuthoritySync = false;
 let multiplayerWorlds = {};
 let multiplayerWorldRevision = 0;
 let multiplayerAppliedWorldRevision = -1;
 let multiplayerEarthWandererTarget = null;
 let multiplayerMartianTargets = null;
+let multiplayerMartianEnemyTargets = null;
 let multiplayerProjectileSequence = 0;
 const multiplayerCombatEvents = [];
 const processedMultiplayerCombatEvents = new Map();
@@ -903,6 +906,25 @@ function getMultiplayerSnapshot() {
         animationFrame: npc.animationFrame,
       }))
       : null,
+    martianEnemies: (isMars(game.surface.planet) || isLuna(game.surface.planet))
+      ? game.martianEnemies.map((enemy) => ({
+        id: enemy.id,
+        type: enemy.type,
+        x: enemy.x / SURFACE_WORLD_SIZE,
+        y: enemy.y / SURFACE_WORLD_SIZE,
+        hp: enemy.hp,
+        maxHp: enemy.maxHp,
+        ammo: enemy.ammo,
+        maxAmmo: enemy.maxAmmo,
+        facing: enemy.facing,
+        animationFrame: enemy.animationFrame,
+        isMoving: enemy.isMoving,
+        shooting: game.time < enemy.shotUntil,
+      }))
+      : null,
+    collectedPickupIds: [...game.player.collectedPickupIds]
+      .filter((id) => id.startsWith(`${getPlanetResourceStateKey(game.surface.planet)}:`))
+      .slice(-5000),
   } : null;
   // Estado visual del jugador en superficie (hoverboard, pose de inventario, armas) para que los demás lo vean.
   const knifeSwinging = Boolean(
@@ -1109,8 +1131,7 @@ async function loadAuthenticatedGameState() {
     if (!isValidGameState(result.state)) throw new Error('La partida del servidor tiene un formato no válido.');
     return { state: result.state, source: 'server' };
   }
-  const localState = loadGameState(true);
-  return { state: localState, source: localState ? 'local' : 'new' };
+  return { state: null, source: 'new' };
 }
 
 function refreshGameAfterRestore() {
@@ -1281,10 +1302,17 @@ async function syncMultiplayer(force = false) {
     const activeWorldKey = game.scene === 'surface' && game.surface
       ? game.surface.planet.name.toLowerCase()
       : '';
+    const previousWorldOwnerId = multiplayerWorldOwnerId;
+    const previousWorldOwnerPlanetKey = multiplayerWorldOwnerPlanetKey;
     multiplayerWorldOwnerId = Array.isArray(responseState)
       ? ''
       : responseState.worldOwners?.[activeWorldKey] || '';
+    multiplayerWorldOwnerPlanetKey = activeWorldKey;
     multiplayerIsWorldOwner = multiplayerWorldOwnerId === multiplayerPlayerId;
+    multiplayerWorldNeedsAuthoritySync = multiplayerIsWorldOwner && (
+      previousWorldOwnerId !== multiplayerPlayerId ||
+      previousWorldOwnerPlanetKey !== activeWorldKey
+    );
     multiplayerWorlds = Array.isArray(responseState) ? {} : (responseState.worlds || {});
     multiplayerWorldRevision += 1;
     const previousPlayers = new Map(multiplayerPlayers.map((player) => [player.id, player]));
@@ -1355,11 +1383,10 @@ function applySharedSurfaceWorld(dt, blend) {
   const worldKey = game.surface.planet.name.toLowerCase();
   const world = multiplayerWorlds[worldKey];
   if (!world) return;
+  const synchronizeNewOwner = multiplayerIsWorldOwner && multiplayerWorldNeedsAuthoritySync;
 
   if (multiplayerAppliedWorldRevision !== multiplayerWorldRevision) {
-    const collected = game.player.collectedPickupIds;
     game.surface.pickups = world.pickups
-      .filter((pickup) => !collected.has(pickup.id))
       .map((pickup) => {
         const resource = RESOURCE_CATALOG[pickup.resourceKey];
         if (!resource) return null;
@@ -1377,13 +1404,14 @@ function applySharedSurfaceWorld(dt, blend) {
       .filter(Boolean);
     multiplayerEarthWandererTarget = world.earthWanderer || null;
     multiplayerMartianTargets = Array.isArray(world.martianNpcs) ? world.martianNpcs : null;
+    multiplayerMartianEnemyTargets = Array.isArray(world.martianEnemies) ? world.martianEnemies : null;
     multiplayerAppliedWorldRevision = multiplayerWorldRevision;
   }
 
-  if (!multiplayerIsWorldOwner && isHomeworld(game.surface.planet) && !multiplayerEarthWandererTarget) {
+  if ((!multiplayerIsWorldOwner || synchronizeNewOwner) && isHomeworld(game.surface.planet) && !multiplayerEarthWandererTarget) {
     game.earthWanderer = null;
   }
-  if (!multiplayerIsWorldOwner && isHomeworld(game.surface.planet) && multiplayerEarthWandererTarget) {
+  if ((!multiplayerIsWorldOwner || synchronizeNewOwner) && isHomeworld(game.surface.planet) && multiplayerEarthWandererTarget) {
     const target = multiplayerEarthWandererTarget;
     const npc = game.earthWanderer || (game.earthWanderer = {
       x: target.x * SURFACE_WORLD_SIZE,
@@ -1416,7 +1444,7 @@ function applySharedSurfaceWorld(dt, blend) {
     npc.greetingPhase = target.greetingPhase;
   }
 
-  if (!multiplayerIsWorldOwner && isMars(game.surface.planet) && multiplayerMartianTargets) {
+  if ((!multiplayerIsWorldOwner || synchronizeNewOwner) && isMars(game.surface.planet) && multiplayerMartianTargets) {
     if (!Array.isArray(game.martianNpcs) || game.martianNpcs.length !== multiplayerMartianTargets.length) {
       game.martianNpcs = multiplayerMartianTargets.map((npc, index) => ({
         id: index,
@@ -1445,6 +1473,52 @@ function applySharedSurfaceWorld(dt, blend) {
       npc.animationFrame = target.animationFrame;
     });
   }
+
+  if ((!multiplayerIsWorldOwner || synchronizeNewOwner) && (isMars(game.surface.planet) || isLuna(game.surface.planet))) {
+    const targets = multiplayerMartianEnemyTargets ?? [];
+    const currentEnemies = new Map(game.martianEnemies.map((enemy) => [enemy.id, enemy]));
+    game.martianEnemies = targets.map((target) => {
+      const enemy = currentEnemies.get(target.id) ?? {
+        id: target.id,
+        type: target.type,
+        planetName: game.surface.planet.name,
+        runSpeedMultiplier: target.type === 'lunatic' ? 2 : 1,
+        x: target.x * SURFACE_WORLD_SIZE,
+        y: target.y * SURFACE_WORLD_SIZE,
+        hp: target.hp,
+        maxHp: target.maxHp,
+        ammo: target.ammo,
+        maxAmmo: target.maxAmmo,
+        facing: target.facing,
+        isMoving: target.isMoving,
+        animationFrame: target.animationFrame,
+        shotUntil: 0,
+      };
+      enemy.type = target.type;
+      enemy.planetName = game.surface.planet.name;
+      enemy.runSpeedMultiplier = target.type === 'lunatic' ? 2 : 1;
+      enemy.hp = target.hp;
+      enemy.maxHp = target.maxHp;
+      enemy.ammo = target.ammo;
+      enemy.maxAmmo = target.maxAmmo;
+      enemy.facing = target.facing;
+      enemy.isMoving = target.isMoving;
+      enemy.animationFrame = target.animationFrame;
+      if (target.shooting) enemy.shotUntil = game.time + 0.12;
+      enemy.multiplayerTargetX = target.x * SURFACE_WORLD_SIZE;
+      enemy.multiplayerTargetY = target.y * SURFACE_WORLD_SIZE;
+      return enemy;
+    });
+    for (const enemy of game.martianEnemies) {
+      enemy.x = wrapSurfaceCoordinate(
+        enemy.x + getSurfaceAxisDelta(enemy.multiplayerTargetX, enemy.x) * blend
+      );
+      enemy.y = wrapSurfaceCoordinate(
+        enemy.y + getSurfaceAxisDelta(enemy.multiplayerTargetY, enemy.y) * blend
+      );
+    }
+  }
+  if (synchronizeNewOwner) multiplayerWorldNeedsAuthoritySync = false;
 }
 
 chatComposer.addEventListener('submit', (event) => {
@@ -1470,14 +1544,14 @@ const HOME_NPC_LAYOUT = {
   chest: { x: 0.2, y: 0.76 },
   workbench: { x: 0.84, y: 0.76 },
 };
+const HOME_LAYOUT_WIDTH = 800;
+const HOME_LAYOUT_HEIGHT = 800;
 
 function getHomeNpcPosition(key) {
   const layout = HOME_NPC_LAYOUT[key];
-  const layoutWidth = game.surface?.baseViewportWidth ?? game.width;
-  const layoutHeight = game.surface?.baseViewportHeight ?? game.height;
   return {
-    x: snapSurfaceCoordinate((game.surface?.shipX ?? SURFACE_WORLD_SIZE * 0.58125) + (layout.x - 0.58125) * layoutWidth),
-    y: snapSurfaceCoordinate((game.surface?.shipY ?? SURFACE_WORLD_SIZE * 0.6) + (layout.y - 0.6) * layoutHeight),
+    x: snapSurfaceCoordinate((game.surface?.shipX ?? SURFACE_WORLD_SIZE * 0.58125) + (layout.x - 0.58125) * HOME_LAYOUT_WIDTH),
+    y: snapSurfaceCoordinate((game.surface?.shipY ?? SURFACE_WORLD_SIZE * 0.6) + (layout.y - 0.6) * HOME_LAYOUT_HEIGHT),
   };
 }
 
@@ -1489,8 +1563,8 @@ function createEarthWanderer() {
   const player = game.surface;
   for (let attempt = 0; attempt < 40; attempt += 1) {
     const point = snapSurfacePoint(
-      player.shipX + (player.baseViewportWidth ?? game.width) * (0.62 + Math.random() * 0.22 - 0.58125),
-      player.shipY + (player.baseViewportHeight ?? game.height) * (0.4 + Math.random() * 0.32 - 0.6)
+      player.shipX + HOME_LAYOUT_WIDTH * (0.62 + Math.random() * 0.22 - 0.58125),
+      player.shipY + HOME_LAYOUT_HEIGHT * (0.4 + Math.random() * 0.32 - 0.6)
     );
     if (
       !isSurfaceTileBlocked(point.x, point.y) &&
@@ -1515,8 +1589,8 @@ function createEarthWanderer() {
   }
   return {
     ...snapSurfacePoint(
-      player.shipX + (player.baseViewportWidth ?? game.width) * (0.68 - 0.58125),
-      player.shipY + (player.baseViewportHeight ?? game.height) * (0.46 - 0.6)
+      player.shipX + HOME_LAYOUT_WIDTH * (0.68 - 0.58125),
+      player.shipY + HOME_LAYOUT_HEIGHT * (0.46 - 0.6)
     ),
     facing: 'down',
     step: null,
@@ -2623,18 +2697,11 @@ function getMarsFloorCanvas() {
 function getMarsMountainChunk(chunkX, chunkY) {
   chunkX = wrapCell(chunkX, SURFACE_CHUNK_COUNT);
   chunkY = wrapCell(chunkY, SURFACE_CHUNK_COUNT);
-  const key = `${chunkX},${chunkY}`;
+  const planetSeed = game.surface?.planet?.seed ?? 0;
+  const key = `${planetSeed}:${chunkX},${chunkY}`;
   if (marsMountainChunkCache.has(key)) return marsMountainChunkCache.get(key);
 
-  // Semilla estable por chunk: la montaña no cambia al salir y volver a la zona.
-  let seed = (chunkX * 374761393 + chunkY * 668265263 + 0x4d415253) >>> 0;
-  const random = () => {
-    seed = (seed + 0x6d2b79f5) >>> 0;
-    let value = seed;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
+  const random = createRandom(coordinateSeed(chunkX, chunkY, planetSeed ^ 0x4d415253));
 
   const mountains = [];
   const mountainRolls = random() < 0.5 ? 2 : 1;
@@ -2715,16 +2782,10 @@ function getVisibleMarsMountains(centerX, centerY, halfWidth, halfHeight) {
 function getMarsGroundSpotChunk(chunkX, chunkY) {
   chunkX = wrapCell(chunkX, SURFACE_CHUNK_COUNT);
   chunkY = wrapCell(chunkY, SURFACE_CHUNK_COUNT);
-  const key = `${chunkX},${chunkY}`;
+  const planetSeed = game.surface?.planet?.seed ?? 0;
+  const key = `${planetSeed}:${chunkX},${chunkY}`;
   if (marsGroundSpotCache.has(key)) return marsGroundSpotCache.get(key);
-  let seed = (chunkX * 2246822519 + chunkY * 3266489917 + 0x4d415253) >>> 0;
-  const random = () => {
-    seed = (seed + 0x6d2b79f5) >>> 0;
-    let value = seed;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
+  const random = createRandom(coordinateSeed(chunkX, chunkY, planetSeed ^ 0x4d415253));
   const spots = [];
   const baseX = chunkX * CHUNK_SIZE;
   const baseY = chunkY * CHUNK_SIZE;
@@ -2773,16 +2834,10 @@ function drawMarsGroundSpots(centerX, centerY, halfWidth, halfHeight) {
 function getLunaCraterChunk(chunkX, chunkY) {
   chunkX = wrapCell(chunkX, SURFACE_CHUNK_COUNT);
   chunkY = wrapCell(chunkY, SURFACE_CHUNK_COUNT);
-  const key = `${chunkX},${chunkY}`;
+  const planetSeed = game.surface?.planet?.seed ?? 0;
+  const key = `${planetSeed}:${chunkX},${chunkY}`;
   if (lunaCraterChunkCache.has(key)) return lunaCraterChunkCache.get(key);
-  let seed = (chunkX * 2246822519 + chunkY * 3266489917 + 0x4c554e41) >>> 0;
-  const random = () => {
-    seed = (seed + 0x6d2b79f5) >>> 0;
-    let value = seed;
-    value = Math.imul(value ^ (value >>> 15), value | 1);
-    value ^= value + Math.imul(value ^ (value >>> 7), value | 61);
-    return ((value ^ (value >>> 14)) >>> 0) / 4294967296;
-  };
+  const random = createRandom(coordinateSeed(chunkX, chunkY, planetSeed ^ 0x4c554e41));
   const craters = [];
   const baseX = chunkX * CHUNK_SIZE;
   const baseY = chunkY * CHUNK_SIZE;
@@ -9348,7 +9403,7 @@ function drawRemotePlayersSurface(planetName) {
       ctx.fill();
     }
     drawRemoteSurfaceWeapon(remote, surfacePoint);
-    drawWorldText(remote.name || 'PILOTO', surfaceX, surfaceY - PLAYER_SPRITE_SIZE / 2 - 8, '#9df4ff', false, WORLD_FONT_SIZE / 1.5);
+    drawWorldText(remote.name || 'PILOTO', surfaceX, surfaceY - PLAYER_SPRITE_SIZE / 2 - 8, '#ffe45b', false, WORLD_FONT_SIZE / 1.5);
     if (remote.chat) drawSpeechBubble(remote.chat, surfaceX, surfaceY - PLAYER_SPRITE_SIZE / 2 - 14, '#72eaff', '#e3fbff');
   }
 }
@@ -9361,7 +9416,7 @@ function drawRemoteSpaceLabels() {
     const screenX = game.width / 2 + (remote.drawX - game.player.x) * zoom;
     const screenY = game.height / 2 + (remote.drawY - game.player.y) * zoom;
     if (screenX < -120 || screenX > game.width + 120 || screenY < -100 || screenY > game.height + 100) continue;
-    drawWorldText(remote.name || 'PILOTO', screenX, screenY - 24, '#9df4ff', false, WORLD_FONT_SIZE / 1.5);
+    drawWorldText(remote.name || 'PILOTO', screenX, screenY - 24, '#ffe45b', false, WORLD_FONT_SIZE / 1.5);
     if (remote.chat) drawSpeechBubble(remote.chat, screenX, screenY - 32, '#72eaff', '#e3fbff');
   }
 }
@@ -10958,7 +11013,7 @@ function drawSurfaceScene() {
     ctx.restore();
   }
   const playerSpriteHalfHeight = game.player.hoverboardEquipped ? 24 : PLAYER_SPRITE_SIZE / 2;
-  drawWorldText('JUGADOR', game.surface.x, game.surface.y - playerSpriteHalfHeight - 8, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
+  drawWorldText(multiplayerName, game.surface.x, game.surface.y - playerSpriteHalfHeight - 8, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
   drawPlayerChatBubble(
     game.surface.x,
     game.surface.y - playerSpriteHalfHeight - WORLD_FONT_SIZE / 1.5 - 18
@@ -11343,7 +11398,7 @@ function draw() {
   drawEmergencyServiceShip();
   drawRemoteSpaceLabels();
   drawEnemyEdgeIndicators();
-  drawWorldText('JUGADOR', game.width / 2, game.height / 2 - 22, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
+  drawWorldText(multiplayerName, game.width / 2, game.height / 2 - 22, '#fff9c4', false, WORLD_FONT_SIZE / 1.5);
   drawPlayerChatBubble(game.width / 2, game.height / 2 - 34);
   drawRadar();
   drawSpaceFrame();

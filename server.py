@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parent
 PLAYER_TTL_SECONDS = 20
 MAX_REQUEST_BYTES = 2_000_000
 MAX_SAVE_BYTES = 10_000_000
+WORLD_SAVE_INTERVAL_SECONDS = 1
 STATE_LOCK = threading.RLock()
 PLAYERS: dict[str, dict] = {}
 WORLDS: dict[str, dict] = {}
@@ -24,8 +25,11 @@ WORLD_OWNERS: dict[str, str] = {}
 DATA_DIR = Path(os.environ.get("SPACEHEAVEN_DATA_DIR", ROOT / "data"))
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
 SAVES_FILE = DATA_DIR / "saves.json"
+WORLDS_FILE = DATA_DIR / "worlds.json"
 AUTH_LOCK = threading.RLock()
 SAVE_LOCK = threading.RLock()
+WORLDS_DIRTY = False
+WORLDS_LAST_SAVED_AT = 0.0
 PASSWORD_ITERATIONS = 310_000
 
 
@@ -86,8 +90,52 @@ def save_game_saves(data: dict) -> None:
             os.unlink(temp_name)
 
 
+def load_shared_worlds() -> dict:
+    try:
+        data = json.loads(WORLDS_FILE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"El archivo de mundos compartidos no es JSON válido: {WORLDS_FILE}") from error
+    if not isinstance(data, dict) or data.get("schema_version") != 1 or not isinstance(data.get("worlds"), dict):
+        raise RuntimeError(f"El archivo de mundos compartidos tiene un formato no válido: {WORLDS_FILE}")
+    return {
+        key: world for key, world in data["worlds"].items()
+        if isinstance(key, str) and isinstance(world, dict)
+    }
+
+
+def save_shared_worlds(now: float, force: bool = False) -> None:
+    global WORLDS_DIRTY, WORLDS_LAST_SAVED_AT
+    if not WORLDS_DIRTY or (not force and now - WORLDS_LAST_SAVED_AT < WORLD_SAVE_INTERVAL_SECONDS):
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix="worlds-", suffix=".tmp", dir=DATA_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(
+                {"schema_version": 1, "worlds": WORLDS},
+                stream,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, WORLDS_FILE)
+        WORLDS_DIRTY = False
+        WORLDS_LAST_SAVED_AT = now
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def public_world(world: dict) -> dict:
+    return {key: value for key, value in world.items() if key != "_collectedPickupIds"}
+
+
 ACCOUNTS = load_accounts()
 GAME_SAVES = load_game_saves()
+WORLDS.update(load_shared_worlds())
 if ACCOUNTS_FILE.exists():
     try:
         saved_accounts = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
@@ -220,11 +268,12 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             result = {
                 "players": players,
                 "worldOwners": dict(WORLD_OWNERS),
-                "worlds": WORLDS,
+                "worlds": {key: public_world(world) for key, world in WORLDS.items()},
             }
         self.send_json(200, result)
 
     def do_POST(self) -> None:
+        global WORLDS_DIRTY
         route = urlsplit(self.path).path
         if route not in ("/api/players", "/api/save", "/api/auth/register", "/api/auth/login", "/api/auth/logout"):
             self.send_json(404, {"error": "not found"})
@@ -242,6 +291,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             with STATE_LOCK:
                 PLAYERS.pop(account["id"], None)
                 prune_stale_players(time.time())
+                save_shared_worlds(time.time(), force=True)
             self.send_json(200, {"ok": True})
             return
         try:
@@ -331,13 +381,57 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             surface_world = snapshot.get("surfaceWorld")
             planet = str(snapshot.get("planet", "")).strip().lower()
             if snapshot.get("scene") == "surface" and planet and isinstance(surface_world, dict):
+                existing_world = WORLDS.get(planet)
                 owner_id = WORLD_OWNERS.get(planet)
-                if owner_id not in PLAYERS:
+                newly_assigned_owner = owner_id not in PLAYERS
+                if newly_assigned_owner:
                     WORLD_OWNERS[planet] = player_id
                     owner_id = player_id
-                if owner_id == player_id:
-                    WORLDS[planet] = surface_world
-            visible_worlds = {planet: WORLDS[planet]} if planet in WORLDS else {}
+                is_world_owner = owner_id == player_id
+                previous_collected_ids = (
+                    existing_world.get("_collectedPickupIds", []) if existing_world else []
+                )
+                ordered_collected_ids = [
+                    pickup_id for pickup_id in previous_collected_ids
+                    if isinstance(pickup_id, str)
+                ] if isinstance(previous_collected_ids, list) else []
+                incoming_collected_ids = surface_world.get("collectedPickupIds", [])
+                if isinstance(incoming_collected_ids, list):
+                    ordered_collected_ids.extend(
+                        pickup_id for pickup_id in incoming_collected_ids
+                        if isinstance(pickup_id, str) and len(pickup_id) <= 256
+                    )
+                ordered_collected_ids = list(dict.fromkeys(ordered_collected_ids))[-20_000:]
+                collected_ids = set(ordered_collected_ids)
+
+                if is_world_owner and (not newly_assigned_owner or existing_world is None):
+                    shared_world = {
+                        key: value for key, value in surface_world.items()
+                        if key != "collectedPickupIds"
+                    }
+                elif existing_world is not None:
+                    shared_world = dict(existing_world)
+                else:
+                    shared_world = {
+                        key: value for key, value in surface_world.items()
+                        if key != "collectedPickupIds"
+                    }
+
+                previous_world = WORLDS.get(planet)
+                shared_world["_collectedPickupIds"] = ordered_collected_ids
+                if isinstance(shared_world.get("pickups"), list):
+                    shared_world["pickups"] = [
+                        pickup for pickup in shared_world["pickups"]
+                        if isinstance(pickup, dict) and pickup.get("id") not in collected_ids
+                    ]
+                if shared_world != previous_world:
+                    WORLDS[planet] = shared_world
+                    WORLDS_DIRTY = True
+                save_shared_worlds(now)
+
+            visible_worlds = {
+                planet: public_world(WORLDS[planet])
+            } if planet in WORLDS else {}
             result = {
                 "ok": True,
                 "players": [public_player_snapshot(entry["snapshot"]) for peer_id, entry in PLAYERS.items() if peer_id != player_id],

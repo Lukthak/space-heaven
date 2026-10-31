@@ -26,14 +26,34 @@
   display: grid;
   place-items: center;
   padding: 20px;
-  background: #000;
+  overflow: hidden;
+  background: #02060d;
   color: #b9ffca;
   font-family: var(--pixel-font), monospace;
+}
+
+.auth-gate::before {
+  position: absolute;
+  inset: 0;
+  background-image:
+    radial-gradient(1px 1px at 8% 17%, #e6f4ff 98%, transparent),
+    radial-gradient(1px 1px at 19% 73%, #b8d7ff 98%, transparent),
+    radial-gradient(1.5px 1.5px at 31% 29%, #fff 98%, transparent),
+    radial-gradient(1px 1px at 44% 88%, #c4ddff 98%, transparent),
+    radial-gradient(1px 1px at 57% 12%, #fff 98%, transparent),
+    radial-gradient(1.5px 1.5px at 68% 63%, #e6f4ff 98%, transparent),
+    radial-gradient(1px 1px at 79% 34%, #b8d7ff 98%, transparent),
+    radial-gradient(1px 1px at 92% 81%, #fff 98%, transparent);
+  background-size: 100% 100%;
+  content: "";
+  pointer-events: none;
 }
 
 .auth-gate[hidden] { display: none; }
 
 .auth-card {
+  position: relative;
+  z-index: 1;
   display: grid;
   gap: 14px;
   width: min(100%, 440px);
