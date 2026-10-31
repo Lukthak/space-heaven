@@ -1,1 +1,2 @@
-# Servidor basado solo en la biblioteca estándar de Python.
+# psycopg3 conecta con PostgreSQL cuando se configura DATABASE_URL.
+psycopg[binary,pool]>=3.2,<4

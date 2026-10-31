@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Administración - SpaceHeaven</title>
+    <style>
+      :root { color-scheme: dark; font-family: Consolas, monospace; background: #05070b; color: #e8edf5; }
+      * { box-sizing: border-box; }
+      body { max-width: 1200px; margin: 0 auto; padding: 24px; }
+      header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 22px; }
+      h1 { margin: 0; color: #fff; font-size: 24px; }
+      h2 { margin: 0 0 12px; font-size: 16px; }
+      p { color: #aab4c3; }
+      a, button { color: #fff; }
+      a { text-decoration: none; }
+      button { padding: 9px 13px; border: 1px solid #53677e; background: #111a26; font: inherit; cursor: pointer; }
+      button:hover, a:hover { color: #85d7ff; }
+      #status { min-height: 22px; margin: 0 0 14px; color: #9dcfff; }
+      #status.error { color: #ff9a9a; }
+      #updated { color: #9aa8ba; font-size: 12px; }
+      .counts { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin: 18px 0 26px; }
+      .count, section { border: 1px solid #263648; background: #0b111a; }
+      .count { padding: 16px; }
+      .count span { display: block; color: #9aa8ba; font-size: 12px; }
+      .count strong { display: block; margin-top: 9px; color: #fff; font-size: 24px; }
+      section { margin: 14px 0; padding: 16px; overflow: hidden; }
+      .table-wrap { overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; text-align: left; }
+      th, td { padding: 9px 10px; border-bottom: 1px solid #202c3a; white-space: nowrap; }
+      th { color: #9dcfff; font-weight: 600; }
+      td { color: #d7dee8; }
+      .empty { color: #8997a8; text-align: center; }
+      @media (max-width: 600px) { body { padding: 14px; } h1 { font-size: 20px; } }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Administración del servidor</h1>
+        <p id="updated">Consultando datos…</p>
+      </div>
+      <div>
+        <button id="refresh" type="button">Actualizar</button>
+        <a href="/">Volver al juego</a>
+      </div>
+    </header>
+    <p id="status" role="status" aria-live="polite"></p>
+    <main id="dashboard" hidden>
+      <div class="counts" aria-label="Resumen">
+        <div class="count"><span>Cuentas</span><strong id="accountCount">0</strong></div>
+        <div class="count"><span>Partidas guardadas</span><strong id="saveCount">0</strong></div>
+        <div class="count"><span>Mundos planetarios</span><strong id="worldCount">0</strong></div>
+        <div class="count"><span>Jugadores conectados</span><strong id="onlineCount">0</strong></div>
+      </div>
+      <section>
+        <h2>Cuentas y partidas</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Usuario</th><th>Partida</th><th>Último guardado</th></tr></thead>
+          <tbody id="accounts"></tbody>
+        </table></div>
+      </section>
+      <section>
+        <h2>Mundos compartidos</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Planeta</th><th>Objetos en el suelo</th><th>Última actualización</th></tr></thead>
+          <tbody id="worlds"></tbody>
+        </table></div>
+      </section>
+      <section>
+        <h2>Jugadores conectados ahora</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Usuario</th><th>Escena</th></tr></thead>
+          <tbody id="online"></tbody>
+        </table></div>
+      </section>
+      <section>
+        <h2>Actividad reciente</h2>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Fecha</th><th>Evento</th><th>Usuario</th></tr></thead>
+          <tbody id="events"></tbody>
+        </table></div>
+      </section>
+    </main>
+    <script>
+      const status = document.querySelector('#status');
+      const dashboard = document.querySelector('#dashboard');
+      const token = localStorage.getItem('spaceHeaven.authToken') || '';
+      const eventLabels = { login: 'Inicio de sesión', logout: 'Cierre de sesión', connect: 'Conexión al juego', disconnect: 'Desconexión' };
+
+      function formatDate(timestamp) {
+        if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) return '—';
+        return new Date(timestamp * 1000).toLocaleString();
+      }
+
+      function fillTable(id, rows, columns, emptyMessage) {
+        const body = document.querySelector(`#${id}`);
+        body.replaceChildren();
+        if (!rows.length) {
+          const row = body.insertRow();
+          const cell = row.insertCell();
+          cell.colSpan = columns.length;
+          cell.className = 'empty';
+          cell.textContent = emptyMessage;
+          return;
+        }
+        for (const item of rows) {
+          const row = body.insertRow();
+          for (const column of columns) {
+            const cell = row.insertCell();
+            cell.textContent = column(item);
+          }
+        }
+      }
+
+      async function refresh() {
+        status.className = '';
+        status.textContent = '';
+        if (!token) {
+          status.className = 'error';
+          status.textContent = 'Inicia sesión en el juego con una cuenta autorizada para consultar esta página.';
+          return;
+        }
+        try {
+          const response = await fetch('/api/admin/overview', {
+            headers: { Authorization: 'Bearer ' + token },
+            cache: 'no-store',
+          });
+          const data = await response.json();
+          if (response.status === 401) throw new Error('La sesión venció. Inicia sesión otra vez en el juego.');
+          if (response.status === 403) throw new Error('Esta cuenta no tiene permisos de administrador del servidor.');
+          if (!response.ok) throw new Error(data.error || `Error del servidor: HTTP ${response.status}`);
+
+          document.querySelector('#accountCount').textContent = data.counts.accounts;
+          document.querySelector('#saveCount').textContent = data.counts.saves;
+          document.querySelector('#worldCount').textContent = data.counts.worlds;
+          document.querySelector('#onlineCount').textContent = data.counts.online;
+          fillTable('accounts', data.accounts, [
+            (item) => item.username,
+            (item) => item.hasSave ? 'Guardada' : 'Sin partida',
+            (item) => formatDate(item.savedAt),
+          ], 'No hay cuentas.');
+          fillTable('worlds', data.worlds, [
+            (item) => item.planet,
+            (item) => item.pickups,
+            (item) => formatDate(item.updatedAt),
+          ], 'No hay mundos guardados.');
+          fillTable('online', data.online, [
+            (item) => item.username,
+            (item) => item.scene || '—',
+          ], 'No hay jugadores conectados.');
+          fillTable('events', data.events, [
+            (item) => formatDate(item.occurred_at),
+            (item) => eventLabels[item.event_type] || item.event_type,
+            (item) => item.username,
+          ], 'No hay actividad registrada.');
+          dashboard.hidden = false;
+          document.querySelector('#updated').textContent =
+            `Almacenamiento: ${data.storage} · Actualizado: ${new Date().toLocaleString()}`;
+        } catch (error) {
+          dashboard.hidden = true;
+          status.className = 'error';
+          status.textContent = error.message || 'No se pudieron cargar los datos administrativos.';
+          document.querySelector('#updated').textContent = 'No se pudieron actualizar los datos.';
+        }
+      }
+
+      document.querySelector('#refresh').addEventListener('click', refresh);
+      refresh();
+    </script>
+  </body>
+</html>

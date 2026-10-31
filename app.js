@@ -108,6 +108,7 @@ let messageTimeout = null;
 let earthWandererDialogOpen = false;
 let earthWandererDialogText = '';
 let earthWandererTipIndex = 0;
+let serverAdmin = false;
 let playerChatMessage = '';
 let playerChatMessageUntil = 0;
 let adminCommandsEnabled = false;
@@ -734,12 +735,24 @@ function sendChatMessage(text) {
   }
   if (message.toLowerCase() === '/ilovebeingadmin') {
     adminCommandsEnabled = true;
-    setMessage('Comandos activados: /repair, /craft, /home, /mision, /mars, /fuel, /regolito, /money, /enemy.');
+    const adminCommandList = '/repair, /craft, /home, /mision, /mars, /fuel, /regolito, /money, /enemy';
+    setMessage(`Comandos activados: ${adminCommandList}${serverAdmin ? ', /tabla' : ''}.`);
     chatInput.value = '';
     closeChatComposer();
     return;
   }
   if (message.startsWith('/') && !adminCommandsEnabled) {
+    chatInput.value = '';
+    closeChatComposer();
+    return;
+  }
+  if (/^\/tabla(?:\s|$)/i.test(message)) {
+    if (!serverAdmin) {
+      setMessage('Solo un administrador del servidor puede abrir /tabla.');
+    } else {
+      showPlayerChatMessage('/tabla');
+      window.open('/admin.html', '_blank', 'noopener,noreferrer');
+    }
     chatInput.value = '';
     closeChatComposer();
     return;
@@ -1169,6 +1182,18 @@ async function enterAuthenticatedGame(user) {
   if (loadedGame.state && !restoreGameState(loadedGame.state)) {
     throw new Error('No se pudo restaurar la partida guardada.');
   }
+  serverAdmin = false;
+  try {
+    const response = await fetch('/api/admin/access', {
+      headers: { Authorization: 'Bearer ' + authToken },
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const result = await response.json();
+    serverAdmin = result.isAdmin === true;
+  } catch (error) {
+    console.error('No se pudo verificar el acceso administrativo:', error);
+  }
   refreshGameAfterRestore();
   authReady = true;
   multiplayerPlayerId = user.id;
@@ -1256,6 +1281,7 @@ async function logout() {
   authToken = '';
   localStorage.removeItem('spaceHeaven.authToken');
   adminCommandsEnabled = false;
+  serverAdmin = false;
   authGate.hidden = false;
   multiplayerPlayers = [];
   multiplayerReady = false;

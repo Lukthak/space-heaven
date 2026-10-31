@@ -13,6 +13,8 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import storage
+
 ROOT = Path(__file__).resolve().parent
 PLAYER_TTL_SECONDS = 20
 MAX_REQUEST_BYTES = 2_000_000
@@ -26,14 +28,20 @@ DATA_DIR = Path(os.environ.get("SPACEHEAVEN_DATA_DIR", ROOT / "data"))
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
 SAVES_FILE = DATA_DIR / "saves.json"
 WORLDS_FILE = DATA_DIR / "worlds.json"
+ACTIVITY_FILE = DATA_DIR / "activity.json"
 AUTH_LOCK = threading.RLock()
 SAVE_LOCK = threading.RLock()
+ACTIVITY_LOCK = threading.RLock()
 WORLDS_DIRTY = False
 WORLDS_LAST_SAVED_AT = 0.0
 PASSWORD_ITERATIONS = 310_000
 
+DATABASE_ENABLED = storage.initialize()
+
 
 def load_accounts() -> dict:
+    if DATABASE_ENABLED:
+        return storage.load_accounts()
     try:
         data = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
         if (
@@ -50,6 +58,9 @@ def load_accounts() -> dict:
 
 
 def save_accounts(data: dict) -> None:
+    if DATABASE_ENABLED:
+        storage.save_accounts(data)
+        return
     data["schema_version"] = 2
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix="accounts-", suffix=".tmp", dir=DATA_DIR)
@@ -65,6 +76,8 @@ def save_accounts(data: dict) -> None:
 
 
 def load_game_saves() -> dict:
+    if DATABASE_ENABLED:
+        return storage.load_game_saves()
     try:
         data = json.loads(SAVES_FILE.read_text(encoding="utf-8"))
         if isinstance(data, dict):
@@ -77,6 +90,10 @@ def load_game_saves() -> dict:
 
 
 def save_game_saves(data: dict) -> None:
+    if DATABASE_ENABLED:
+        for account_id, state in data.items():
+            storage.save_game(account_id, state)
+        return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix="saves-", suffix=".tmp", dir=DATA_DIR)
     try:
@@ -91,6 +108,8 @@ def save_game_saves(data: dict) -> None:
 
 
 def load_shared_worlds() -> dict:
+    if DATABASE_ENABLED:
+        return storage.load_worlds()
     try:
         data = json.loads(WORLDS_FILE.read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -108,6 +127,11 @@ def load_shared_worlds() -> dict:
 def save_shared_worlds(now: float, force: bool = False) -> None:
     global WORLDS_DIRTY, WORLDS_LAST_SAVED_AT
     if not WORLDS_DIRTY or (not force and now - WORLDS_LAST_SAVED_AT < WORLD_SAVE_INTERVAL_SECONDS):
+        return
+    if DATABASE_ENABLED:
+        storage.save_worlds(WORLDS, now)
+        WORLDS_DIRTY = False
+        WORLDS_LAST_SAVED_AT = now
         return
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd, temp_name = tempfile.mkstemp(prefix="worlds-", suffix=".tmp", dir=DATA_DIR)
@@ -133,10 +157,145 @@ def public_world(world: dict) -> dict:
     return {key: value for key, value in world.items() if key != "_collectedPickupIds"}
 
 
+def is_server_admin(account: dict) -> bool:
+    configured_usernames = os.environ.get("ADMIN_USERNAMES", "")
+    if not configured_usernames.strip() and os.environ.get("RENDER", "").lower() == "true":
+        configured_usernames = "lukthak"
+    allowed_usernames = {
+        username.strip().casefold()
+        for username in configured_usernames.split(",")
+        if username.strip()
+    }
+    return account["username"].casefold() in allowed_usernames
+
+
+def record_activity(event_type: str, account_id: str | None, username: str) -> None:
+    occurred_at = time.time()
+    if DATABASE_ENABLED:
+        storage.record_event(event_type, account_id, username, occurred_at)
+        return
+
+    with ACTIVITY_LOCK:
+        try:
+            events = json.loads(ACTIVITY_FILE.read_text(encoding="utf-8"))
+            if not isinstance(events, list):
+                raise RuntimeError(f"El archivo de actividad tiene un formato no válido: {ACTIVITY_FILE}")
+        except FileNotFoundError:
+            events = []
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"El archivo de actividad no es JSON válido: {ACTIVITY_FILE}") from error
+        events.append({
+            "event_type": event_type,
+            "account_id": account_id,
+            "username": username,
+            "occurred_at": occurred_at,
+        })
+        events = events[-5000:]
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(prefix="activity-", suffix=".tmp", dir=DATA_DIR)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(events, stream, ensure_ascii=False, separators=(",", ":"))
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp_name, ACTIVITY_FILE)
+        finally:
+            if os.path.exists(temp_name):
+                os.unlink(temp_name)
+
+
+def admin_overview() -> dict:
+    now = time.time()
+    with STATE_LOCK:
+        prune_stale_players(now)
+        online = [
+            {"username": entry["snapshot"].get("name", ""), "scene": entry["snapshot"].get("scene", "")}
+            for entry in PLAYERS.values()
+        ]
+
+    if DATABASE_ENABLED:
+        data = storage.admin_data()
+        accounts = [
+            {
+                "username": row["username"],
+                "hasSave": row["saved_at"] is not None,
+                "savedAt": row["saved_at"],
+            }
+            for row in data["accounts"]
+        ]
+        worlds = [
+            {
+                "planet": row["planet_key"],
+                "updatedAt": row["updated_at"],
+                "pickups": (
+                    len(row["state"].get("pickups", []))
+                    if isinstance(row["state"], dict) and isinstance(row["state"].get("pickups"), list)
+                    else 0
+                ),
+            }
+            for row in data["worlds"]
+        ]
+        events = [
+            {
+                "event_type": row["event_type"],
+                "username": row["username"],
+                "occurred_at": row["occurred_at"],
+            }
+            for row in data["events"]
+        ]
+    else:
+        accounts = [
+            {
+                "username": account["username"],
+                "hasSave": account["id"] in GAME_SAVES,
+                "savedAt": GAME_SAVES.get(account["id"], {}).get("savedAt"),
+            }
+            for account in ACCOUNTS["accounts"]
+        ]
+        worlds = [
+            {
+                "planet": planet,
+                "updatedAt": None,
+                "pickups": len(world.get("pickups", [])) if isinstance(world.get("pickups"), list) else 0,
+            }
+            for planet, world in WORLDS.items()
+        ]
+        try:
+            events = json.loads(ACTIVITY_FILE.read_text(encoding="utf-8"))
+            if not isinstance(events, list):
+                raise RuntimeError(f"El archivo de actividad tiene un formato no válido: {ACTIVITY_FILE}")
+        except FileNotFoundError:
+            events = []
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"El archivo de actividad no es JSON válido: {ACTIVITY_FILE}") from error
+        events = [
+            {
+                "event_type": event["event_type"],
+                "username": event["username"],
+                "occurred_at": event["occurred_at"],
+            }
+            for event in reversed(events[-100:])
+        ]
+
+    return {
+        "counts": {
+            "accounts": len(accounts),
+            "saves": sum(account["hasSave"] for account in accounts),
+            "worlds": len(worlds),
+            "online": len(online),
+        },
+        "accounts": accounts,
+        "worlds": worlds,
+        "online": online,
+        "events": events,
+        "storage": "postgresql" if DATABASE_ENABLED else "json",
+    }
+
+
 ACCOUNTS = load_accounts()
 GAME_SAVES = load_game_saves()
 WORLDS.update(load_shared_worlds())
-if ACCOUNTS_FILE.exists():
+if not DATABASE_ENABLED and ACCOUNTS_FILE.exists():
     try:
         saved_accounts = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
         if not isinstance(saved_accounts, dict) or saved_accounts.get("schema_version") != 2:
@@ -157,10 +316,14 @@ def public_user(account: dict) -> dict:
 
 def create_session(account: dict) -> dict:
     token = secrets.token_urlsafe(32)
-    ACCOUNTS["sessions"][hashlib.sha256(token.encode()).hexdigest()] = {
-        "user_id": account["id"], "expires_at": time.time() + 30 * 24 * 60 * 60,
-    }
-    save_accounts(ACCOUNTS)
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    expires_at = time.time() + 30 * 24 * 60 * 60
+    ACCOUNTS["sessions"][token_hash] = {"user_id": account["id"], "expires_at": expires_at}
+    if DATABASE_ENABLED:
+        storage.save_session(token_hash, account["id"], expires_at)
+    else:
+        save_accounts(ACCOUNTS)
+    record_activity("login", account["id"], account["username"])
     return {"token": token, "user": public_user(account)}
 
 
@@ -169,6 +332,8 @@ def authenticated_user(handler) -> dict | None:
     if not authorization.startswith("Bearer "):
         return None
     token_hash = hashlib.sha256(authorization[7:].encode()).hexdigest()
+    if DATABASE_ENABLED:
+        return storage.authenticated_user(token_hash, time.time())
     with AUTH_LOCK:
         session = ACCOUNTS["sessions"].get(token_hash)
         if not session or session.get("expires_at", 0) < time.time():
@@ -187,7 +352,13 @@ def prune_stale_players(now: float) -> None:
         if now - entry["seen_at"] > PLAYER_TTL_SECONDS
     ]
     for player_id in stale_ids:
-        PLAYERS.pop(player_id, None)
+        player = PLAYERS.pop(player_id, None)
+        if player:
+            record_activity(
+                "disconnect",
+                player_id,
+                str(player["snapshot"].get("name", player_id)),
+            )
 
     for world_key, owner_id in list(WORLD_OWNERS.items()):
         owner = PLAYERS.get(owner_id)
@@ -240,6 +411,12 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
         if parsed.path == "/api/health":
+            try:
+                if DATABASE_ENABLED:
+                    storage.healthcheck()
+            except storage.DatabaseError:
+                self.send_json(503, {"ok": False, "service": "spaceheaven", "storage": "unavailable"})
+                return
             self.send_json(200, {"ok": True, "service": "spaceheaven"})
             return
         if parsed.path == "/api/auth/me":
@@ -249,13 +426,33 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 return
             self.send_json(200, {"user": public_user(account)})
             return
+        if parsed.path == "/api/admin/access":
+            account = authenticated_user(self)
+            if not account:
+                self.send_json(401, {"error": "Inicia sesión para consultar el acceso."})
+                return
+            self.send_json(200, {"isAdmin": is_server_admin(account)})
+            return
+        if parsed.path == "/api/admin/overview":
+            account = authenticated_user(self)
+            if not account:
+                self.send_json(401, {"error": "Inicia sesión para ver los datos administrativos."})
+                return
+            if not is_server_admin(account):
+                self.send_json(403, {"error": "No tienes permisos de administrador del servidor."})
+                return
+            self.send_json(200, admin_overview())
+            return
         if parsed.path == "/api/save":
             account = authenticated_user(self)
             if not account:
                 self.send_json(401, {"error": "Inicia sesión para recuperar la partida."})
                 return
-            with SAVE_LOCK:
-                state = GAME_SAVES.get(account["id"])
+            if DATABASE_ENABLED:
+                state = storage.get_game_save(account["id"])
+            else:
+                with SAVE_LOCK:
+                    state = GAME_SAVES.get(account["id"])
             self.send_json(200, {"state": state})
             return
         if parsed.path != "/api/players":
@@ -301,11 +498,17 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             token_hash = hashlib.sha256(authorization[7:].encode()).hexdigest()
             with AUTH_LOCK:
                 ACCOUNTS["sessions"].pop(token_hash, None)
-                save_accounts(ACCOUNTS)
+                if DATABASE_ENABLED:
+                    storage.delete_session(token_hash)
+                else:
+                    save_accounts(ACCOUNTS)
             with STATE_LOCK:
-                PLAYERS.pop(account["id"], None)
+                player = PLAYERS.pop(account["id"], None)
+                if player:
+                    record_activity("disconnect", account["id"], account["username"])
                 prune_stale_players(time.time())
                 save_shared_worlds(time.time(), force=True)
+            record_activity("logout", account["id"], account["username"])
             self.send_json(200, {"ok": True})
             return
         try:
@@ -324,7 +527,11 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 username = str(payload.get("username", "")).strip()
                 password = str(payload.get("password", ""))
                 with AUTH_LOCK:
-                    account = next((a for a in ACCOUNTS["accounts"] if a["username"].casefold() == username.casefold()), None)
+                    account = (
+                        storage.find_account_by_username(username)
+                        if DATABASE_ENABLED
+                        else next((a for a in ACCOUNTS["accounts"] if a["username"].casefold() == username.casefold()), None)
+                    )
                     if route == "/api/auth/register":
                         if not re.fullmatch(r"[A-Za-z0-9_.-]{3,24}", username):
                             self.send_json(400, {"error": "El usuario debe tener 3 a 24 caracteres: letras, números, punto, guion o _."})
@@ -338,7 +545,12 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                         salt, password_hash = hash_password(password)
                         account = {"id": secrets.token_hex(16), "username": username,
                                    "password_salt": salt, "password_hash": password_hash}
-                        ACCOUNTS["accounts"].append(account)
+                        if DATABASE_ENABLED:
+                            if not storage.save_account(account):
+                                self.send_json(409, {"error": "Ese nombre de usuario ya está registrado. Inicia sesión si ya tienes cuenta."})
+                                return
+                        else:
+                            ACCOUNTS["accounts"].append(account)
                     else:
                         salt = bytes.fromhex(account["password_salt"]) if account else b"\0" * 16
                         _, attempted = hash_password(password, salt)
@@ -363,13 +575,19 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 ):
                     self.send_json(400, {"error": "Formato de partida no válido."})
                     return
-                with SAVE_LOCK:
-                    saved_state = GAME_SAVES.get(account["id"])
-                    if saved_state and payload["state"]["savedAt"] < saved_state.get("savedAt", 0):
+                if DATABASE_ENABLED:
+                    if not storage.save_game(account["id"], payload["state"]):
                         self.send_json(409, {"error": "Hay una partida más reciente guardada en el servidor."})
                         return
                     GAME_SAVES[account["id"]] = payload["state"]
-                    save_game_saves(GAME_SAVES)
+                else:
+                    with SAVE_LOCK:
+                        saved_state = GAME_SAVES.get(account["id"])
+                        if saved_state and payload["state"]["savedAt"] < saved_state.get("savedAt", 0):
+                            self.send_json(409, {"error": "Hay una partida más reciente guardada en el servidor."})
+                            return
+                        GAME_SAVES[account["id"]] = payload["state"]
+                        save_game_saves(GAME_SAVES)
                 self.send_json(200, {"ok": True})
                 return
 
@@ -391,6 +609,8 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
         now = time.time()
         with STATE_LOCK:
             prune_stale_players(now)
+            if player_id not in PLAYERS:
+                record_activity("connect", player_id, account["username"])
             PLAYERS[player_id] = {"snapshot": snapshot, "seen_at": now}
             surface_world = snapshot.get("surfaceWorld")
             planet = str(snapshot.get("planet", "")).strip().lower()
