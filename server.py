@@ -215,6 +215,14 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
+    def end_headers(self) -> None:
+        path = urlsplit(self.path).path.lower()
+        if not path.startswith("/api/") and (
+            path in ("/", "/index.html") or path.endswith((".html", ".js", ".css"))
+        ):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def log_message(self, format_string, *args):
         if not self.path.startswith(("/api/players", "/api/auth")):
             super().log_message(format_string, *args)
@@ -251,6 +259,12 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             self.send_json(200, {"state": state})
             return
         if parsed.path != "/api/players":
+            if not parsed.path.startswith("/api/"):
+                requested_path = Path(self.translate_path(parsed.path)).resolve()
+                data_path = DATA_DIR.resolve()
+                if requested_path == data_path or data_path in requested_path.parents:
+                    self.send_error(404)
+                    return
             return super().do_GET()
 
         account = authenticated_user(self)
