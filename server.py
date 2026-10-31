@@ -167,10 +167,8 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             return super().do_GET()
 
         account = authenticated_user(self)
-        if not account:
-            self.send_json(401, {"error": "Inicia sesión para jugar en línea."})
-            return
-        self_id = account["id"]
+        guest_id = parse_qs(parsed.query).get("self", [""])[0]
+        self_id = account["id"] if account else f"guest:{guest_id}"
         now = time.time()
         with STATE_LOCK:
             prune_stale_players(now)
@@ -230,17 +228,22 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 self.send_json(201 if route.endswith("register") else 200, result)
                 return
 
-            account = authenticated_user(self)
-            if not account:
-                self.send_json(401, {"error": "Inicia sesión para jugar en línea."})
-                return
             snapshot = payload
             if not isinstance(snapshot, dict):
                 self.send_json(400, {"error": "invalid player snapshot"})
                 return
-            player_id = account["id"]
-            snapshot["id"] = player_id
-            snapshot["name"] = account["username"]
+            account = authenticated_user(self)
+            if account:
+                player_id = account["id"]
+                snapshot["id"] = player_id
+                snapshot["name"] = account["username"]
+            else:
+                guest_id = str(snapshot.get("id", "")).strip()
+                if not guest_id or len(guest_id) > 128:
+                    self.send_json(400, {"error": "invalid player snapshot"})
+                    return
+                player_id = f"guest:{guest_id}"
+                snapshot["id"] = player_id
         except (ValueError, json.JSONDecodeError):
             self.send_json(400, {"error": "invalid JSON"})
             return

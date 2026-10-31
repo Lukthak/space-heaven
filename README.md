@@ -97,6 +97,6 @@ Se puede expandir con:
 1. Sube el contenido de esta carpeta a un repositorio de GitHub.
 2. En Render, elige **New + → Blueprint** y conecta ese repositorio.
 3. Render encontrará `render.yaml`; confirma la creación del servicio gratuito `spaceheaven`.
-4. Al terminar, abre la URL `https://spaceheaven.onrender.com` que Render asigne (el nombre puede cambiar si ya está ocupado).
+4. Al terminar, abre la URL `https://space-heaven.onrender.com` que Render asigne (el nombre puede cambiar si ya está ocupado).
 
 El servidor y el juego se publican juntos para que la API multijugador use el mismo dominio. En el plan gratuito el servidor puede tardar en despertar tras un periodo sin visitas y el estado temporal del multijugador se reinicia al dormir o reiniciarse el servicio.
