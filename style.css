@@ -75,43 +75,19 @@
 .auth-toggle { border-color: transparent; background: transparent; color: #81d995; font-size: 8px; }
 .auth-error { color: #ff9292 !important; }
 
-.account-controls {
+.multiplayer-status,
+.multiplayer-ping {
   position: absolute;
   z-index: 3;
   top: 12px;
-  right: 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 7px 9px;
-  border: 1px solid rgba(57, 255, 117, 0.5);
-  background: rgba(0, 5, 2, 0.84);
-  color: #b9ffca;
-  font-size: calc(9px * var(--font-scale));
-}
-
-.account-controls[hidden] { display: none; }
-
-.account-controls button {
-  border: 1px solid #19532c;
-  padding: 6px 8px;
-  background: #06130a;
-  color: #aaffbd;
-  cursor: pointer;
+  color: #fff;
   font: inherit;
+  text-shadow: 1px 1px 2px #000;
+  pointer-events: none;
 }
 
-.account-controls button:hover,
-.account-controls button:focus-visible {
-  border-color: var(--terminal-green);
-  outline: none;
-}
-
-@media (max-width: 480px) {
-  .auth-card h1 { font-size: 14px; }
-  .auth-mark { font-size: 9px; }
-  .account-controls { gap: 5px; padding: 5px; }
-}
+.multiplayer-status { left: 12px; }
+.multiplayer-ping { right: 12px; }
 
 html,
 body {
@@ -148,30 +124,12 @@ body {
 }
 
 .multiplayer-status {
-  position: absolute;
-  z-index: 2;
-  top: 12px;
-  left: 12px;
-  max-width: calc((100% - 24px) / var(--hud-scale, 1));
-  transform: scale(var(--hud-scale, 1));
-  transform-origin: top left;
-  padding: 8px 10px;
-  border: 1px solid rgba(57, 255, 117, 0.5);
-  background: rgba(0, 5, 2, 0.78);
-  color: #b9ffca;
-  font-size: calc(10px * var(--font-scale));
-  line-height: 1.5;
-  pointer-events: none;
+  max-width: calc(100% - 100px);
 }
 
-.multiplayer-status.multiplayer-offline {
-  border-color: rgba(255, 100, 100, 0.65);
-  color: #ffb4b4;
-}
-
-.multiplayer-status.multiplayer-online {
-  border-color: rgba(57, 255, 117, 0.5);
-  color: #b9ffca;
+@media (max-width: 480px) {
+  .auth-card h1 { font-size: 14px; }
+  .auth-mark { font-size: 9px; }
 }
 
 .ship-abilities {

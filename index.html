@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>SpaceHeaven</title>
-    <link rel="stylesheet" href="style.css?v=shared-world-1" />
+    <link rel="stylesheet" href="style.css?v=online-ping-2" />
     <style>
       .radio-panel { box-sizing: border-box; width: 100%; max-height: 54vh; overflow-y: auto; padding: 12px; color: #7dffa2; background: #020804; border: 1px solid #14522c; font-family: inherit; font-size: 13px; }
       .radio-panel * { font-size: 13px !important; }
@@ -27,10 +27,7 @@
     <main class="game-shell">
       <canvas id="gameCanvas" width="800" height="800" aria-label="Mundo de SpaceHeaven"></canvas>
       <div id="multiplayerStatus" class="multiplayer-status" aria-live="polite" hidden></div>
-      <div id="accountControls" class="account-controls" hidden>
-        <span id="accountName"></span>
-        <button id="logoutButton" type="button">Cerrar sesión</button>
-      </div>
+      <div id="multiplayerPing" class="multiplayer-ping" aria-label="Ping" hidden>-- ms</div>
       <section id="authGate" class="auth-gate" aria-labelledby="authTitle">
         <form id="authForm" class="auth-card" autocomplete="on">
           <span class="auth-mark">SPACEHEAVEN ONLINE</span>
@@ -185,6 +182,6 @@
     </main>
 
     <div id="inventoryTooltip" class="inventory-tooltip" role="tooltip" hidden></div>
-    <script src="app.js?v=shared-world-1"></script>
+    <script src="app.js?v=online-ping-2"></script>
   </body>
 </html>

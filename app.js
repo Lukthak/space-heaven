@@ -7,6 +7,7 @@ const messageEl = document.getElementById('message');
 const chatComposer = document.getElementById('chatComposer');
 const chatInput = document.getElementById('chatInput');
 const multiplayerStatus = document.getElementById('multiplayerStatus');
+const multiplayerPing = document.getElementById('multiplayerPing');
 const authGate = document.getElementById('authGate');
 const authForm = document.getElementById('authForm');
 const authUsername = document.getElementById('authUsername');
@@ -16,9 +17,6 @@ const authDescription = document.getElementById('authDescription');
 const authSubmit = document.getElementById('authSubmit');
 const authToggle = document.getElementById('authToggle');
 const authMessage = document.getElementById('authMessage');
-const accountControls = document.getElementById('accountControls');
-const accountName = document.getElementById('accountName');
-const logoutButton = document.getElementById('logoutButton');
 const fuelEmergencyNotice = document.getElementById('fuelEmergencyNotice');
 const emergencyHelpOption = document.getElementById('emergencyHelpOption');
 const emergencyHelpPanel = document.getElementById('emergencyHelpPanel');
@@ -1164,9 +1162,8 @@ async function enterAuthenticatedGame(user) {
   multiplayerName = user.username;
   localStorage.setItem('spaceHeavenMultiplayerId', user.id);
   authGate.hidden = true;
-  accountControls.hidden = false;
-  accountName.textContent = user.username;
   multiplayerStatus.hidden = false;
+  multiplayerPing.hidden = false;
   setAuthenticationMessage('');
   saveGameState(true);
   syncMultiplayer(true);
@@ -1245,13 +1242,13 @@ async function logout() {
   authReady = false;
   authToken = '';
   localStorage.removeItem('spaceHeaven.authToken');
-  accountControls.hidden = true;
   authGate.hidden = false;
   multiplayerPlayers = [];
   multiplayerReady = false;
   game.keys = {};
   closePauseMenu();
   multiplayerStatus.hidden = true;
+  multiplayerPing.hidden = true;
   authForm.reset();
   setAuthenticationMessage('Sesión cerrada.', false);
   if (!inventoryPanel.hidden) toggleInventory(false);
@@ -1272,8 +1269,6 @@ async function logout() {
   authUsername.focus();
 }
 
-logoutButton.addEventListener('click', logout);
-
 async function syncMultiplayer(force = false) {
   if (!multiplayerEndpoint || !authReady || !authToken) return;
   if (multiplayerSyncBusy) {
@@ -1281,6 +1276,7 @@ async function syncMultiplayer(force = false) {
     return;
   }
   multiplayerSyncBusy = true;
+  const syncStartedAt = performance.now();
   try {
     const response = await fetch(multiplayerEndpoint, {
       method: 'POST',
@@ -1292,12 +1288,7 @@ async function syncMultiplayer(force = false) {
       cache: 'no-store',
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const peersResponse = await fetch(`${multiplayerEndpoint}?self=${encodeURIComponent(multiplayerPlayerId)}`, {
-      headers: { Authorization: 'Bearer ' + authToken },
-      cache: 'no-store',
-    });
-    if (!peersResponse.ok) throw new Error(`HTTP ${peersResponse.status}`);
-    const responseState = await peersResponse.json();
+    const responseState = await response.json();
     const peers = Array.isArray(responseState) ? responseState : responseState.players;
     const activeWorldKey = game.scene === 'surface' && game.surface
       ? game.surface.planet.name.toLowerCase()
@@ -1334,13 +1325,15 @@ async function syncMultiplayer(force = false) {
     applyMultiplayerCombatEvents(multiplayerPlayers);
     multiplayerReady = true;
     const count = multiplayerPlayers.length;
-    multiplayerStatus.textContent = count ? `EN LÍNEA · ${count + 1} JUGADORES` : 'EN LÍNEA · ESPERANDO JUGADORES';
+    multiplayerStatus.textContent = `Online: ${count + 1}`;
+    multiplayerPing.textContent = `${Math.round(performance.now() - syncStartedAt)} ms`;
     multiplayerStatus.classList.add('multiplayer-online');
     multiplayerStatus.classList.remove('multiplayer-offline');
   } catch (error) {
     multiplayerReady = false;
     multiplayerPlayers = [];
-    multiplayerStatus.textContent = 'SIN CONEXIÓN';
+    multiplayerStatus.textContent = 'Offline: 0';
+    multiplayerPing.textContent = '-- ms';
     multiplayerStatus.classList.add('multiplayer-offline');
     multiplayerStatus.classList.remove('multiplayer-online');
   } finally {
@@ -1362,7 +1355,7 @@ if (multiplayerEndpoint) {
 }
 
 function updateMultiplayerInterpolation(dt) {
-  const blend = 1 - Math.exp(-14 * dt);
+  const blend = 1 - Math.exp(-30 * dt);
   for (const remote of multiplayerPlayers) {
     remote.drawX += (remote.x - remote.drawX) * blend;
     remote.drawY += (remote.y - remote.drawY) * blend;
@@ -3568,21 +3561,17 @@ function updateSpaceHudOpacity(dt) {
     : Math.max(target, spaceHudOpacity - opacityStep);
   if (game.scene === 'space') {
     shipAbilities.style.opacity = String(spaceHudOpacity);
-    multiplayerStatus.style.opacity = String(spaceHudOpacity);
     const frameColor = getHealthFrameColor();
     for (const frame of shipAbilities.querySelectorAll('.ship-ability')) {
       frame.style.borderColor = frameColor;
       frame.style.boxShadow = `0 0 8px ${frameColor}55`;
     }
-    multiplayerStatus.style.borderColor = frameColor;
   } else {
     shipAbilities.style.opacity = '';
-    multiplayerStatus.style.opacity = '';
     for (const frame of shipAbilities.querySelectorAll('.ship-ability')) {
       frame.style.borderColor = '';
       frame.style.boxShadow = '';
     }
-    multiplayerStatus.style.borderColor = '';
   }
 }
 
@@ -7859,14 +7848,8 @@ async function flushRemoteGameSave(keepalive = false) {
       throw new Error(result.error || `HTTP ${response.status}`);
     }
     lastRemoteSaveAt = Date.now();
-    multiplayerStatus.textContent = multiplayerPlayers.length
-      ? `EN LÍNEA · ${multiplayerPlayers.length + 1} JUGADORES`
-      : 'EN LÍNEA · PARTIDA GUARDADA';
   } catch (error) {
     console.error('No se pudo guardar la partida en el servidor:', error);
-    multiplayerStatus.textContent = 'ERROR AL GUARDAR · REINTENTANDO';
-    multiplayerStatus.classList.add('multiplayer-offline');
-    multiplayerStatus.classList.remove('multiplayer-online');
     if (!remoteSavePending) remoteSavePending = serializedState;
   } finally {
     remoteSaveInFlight = false;
