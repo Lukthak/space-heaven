@@ -16,13 +16,16 @@ from urllib.parse import urlsplit
 ROOT = Path(__file__).resolve().parent
 PLAYER_TTL_SECONDS = 20
 MAX_REQUEST_BYTES = 2_000_000
+MAX_SAVE_BYTES = 10_000_000
 STATE_LOCK = threading.RLock()
 PLAYERS: dict[str, dict] = {}
 WORLDS: dict[str, dict] = {}
 WORLD_OWNERS: dict[str, str] = {}
 DATA_DIR = Path(os.environ.get("SPACEHEAVEN_DATA_DIR", ROOT / "data"))
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
+SAVES_FILE = DATA_DIR / "saves.json"
 AUTH_LOCK = threading.RLock()
+SAVE_LOCK = threading.RLock()
 PASSWORD_ITERATIONS = 310_000
 
 
@@ -57,7 +60,34 @@ def save_accounts(data: dict) -> None:
             os.unlink(temp_name)
 
 
+def load_game_saves() -> dict:
+    try:
+        data = json.loads(SAVES_FILE.read_text(encoding="utf-8"))
+        if isinstance(data, dict):
+            return data
+    except FileNotFoundError:
+        pass
+    except json.JSONDecodeError as error:
+        raise RuntimeError(f"El archivo de partidas guardadas no es JSON válido: {SAVES_FILE}") from error
+    return {}
+
+
+def save_game_saves(data: dict) -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix="saves-", suffix=".tmp", dir=DATA_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, separators=(",", ":"))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, SAVES_FILE)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
 ACCOUNTS = load_accounts()
+GAME_SAVES = load_game_saves()
 if ACCOUNTS_FILE.exists():
     try:
         saved_accounts = json.loads(ACCOUNTS_FILE.read_text(encoding="utf-8"))
@@ -163,6 +193,15 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 return
             self.send_json(200, {"user": public_user(account)})
             return
+        if parsed.path == "/api/save":
+            account = authenticated_user(self)
+            if not account:
+                self.send_json(401, {"error": "Inicia sesión para recuperar la partida."})
+                return
+            with SAVE_LOCK:
+                state = GAME_SAVES.get(account["id"])
+            self.send_json(200, {"state": state})
+            return
         if parsed.path != "/api/players":
             return super().do_GET()
 
@@ -187,7 +226,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
 
     def do_POST(self) -> None:
         route = urlsplit(self.path).path
-        if route not in ("/api/players", "/api/auth/register", "/api/auth/login", "/api/auth/logout"):
+        if route not in ("/api/players", "/api/save", "/api/auth/register", "/api/auth/login", "/api/auth/logout"):
             self.send_json(404, {"error": "not found"})
             return
         if route == "/api/auth/logout":
@@ -207,7 +246,9 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             return
         try:
             size = int(self.headers.get("Content-Length", "0"))
-            max_size = 16_384 if route.startswith("/api/auth/") else MAX_REQUEST_BYTES
+            max_size = 16_384 if route.startswith("/api/auth/") else (
+                MAX_SAVE_BYTES if route == "/api/save" else MAX_REQUEST_BYTES
+            )
             if size <= 0 or size > max_size:
                 self.send_json(413, {"error": "invalid request size"})
                 return
@@ -243,6 +284,29 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                             return
                     result = create_session(account)
                 self.send_json(201 if route.endswith("register") else 200, result)
+                return
+
+            if route == "/api/save":
+                account = authenticated_user(self)
+                if not account:
+                    self.send_json(401, {"error": "Inicia sesión para guardar la partida."})
+                    return
+                if (
+                    not isinstance(payload, dict)
+                    or not isinstance(payload.get("state"), dict)
+                    or not isinstance(payload["state"].get("player"), dict)
+                    or not isinstance(payload["state"].get("savedAt"), (int, float))
+                ):
+                    self.send_json(400, {"error": "Formato de partida no válido."})
+                    return
+                with SAVE_LOCK:
+                    saved_state = GAME_SAVES.get(account["id"])
+                    if saved_state and payload["state"]["savedAt"] < saved_state.get("savedAt", 0):
+                        self.send_json(409, {"error": "Hay una partida más reciente guardada en el servidor."})
+                        return
+                    GAME_SAVES[account["id"]] = payload["state"]
+                    save_game_saves(GAME_SAVES)
+                self.send_json(200, {"ok": True})
                 return
 
             snapshot = payload

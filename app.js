@@ -147,6 +147,10 @@ const multiplayerEndpoint = /^https?:$/.test(location.protocol)
   ? `${location.origin}/api/players`
   : null;
 let lastGameSaveAt = 0;
+let remoteSavePending = null;
+let remoteSaveTimer = null;
+let remoteSaveInFlight = false;
+let lastRemoteSaveAt = 0;
 let draggedInventoryItem = null;
 let draggedItemDroppedInsideInterface = false;
 
@@ -1075,7 +1079,65 @@ function updateAuthenticationMode() {
   authPassword.autocomplete = registering ? 'new-password' : 'current-password';
 }
 
-function enterAuthenticatedGame(user) {
+function isValidGameState(savedState) {
+  const player = savedState?.player;
+  return Boolean(
+    player &&
+    Number.isFinite(player.x) &&
+    Number.isFinite(player.y) &&
+    Number.isFinite(savedState.time) &&
+    Number.isFinite(savedState.savedAt) &&
+    ['space', 'surface'].includes(savedState.scene) &&
+    (savedState.scene !== 'surface' ||
+      (Number.isFinite(savedState.surface?.planetSeed) &&
+        Number.isFinite(savedState.surface?.starChunkX) &&
+        Number.isFinite(savedState.surface?.starChunkY) &&
+        Number.isFinite(savedState.surface?.x) &&
+        Number.isFinite(savedState.surface?.y)))
+  );
+}
+
+async function loadAuthenticatedGameState() {
+  const response = await fetch('/api/save', {
+    headers: { Authorization: 'Bearer ' + authToken },
+    cache: 'no-store',
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+  if (!Object.hasOwn(result, 'state')) throw new Error('Respuesta de partida inválida.');
+  if (result.state !== null) {
+    if (!isValidGameState(result.state)) throw new Error('La partida del servidor tiene un formato no válido.');
+    return { state: result.state, source: 'server' };
+  }
+  const localState = loadGameState(true);
+  return { state: localState, source: localState ? 'local' : 'new' };
+}
+
+function refreshGameAfterRestore() {
+  game.selectedPlanet = game.scene === 'surface'
+    ? game.surface.planet
+    : getNearestPlanet();
+  if (
+    currentInventoryView === 'market' &&
+    (game.scene !== 'surface' || !isHomeworld(game.surface.planet))
+  ) {
+    currentInventoryView = lastInventoryTab;
+  }
+  updateHud();
+  applyInventoryWindowGeometry();
+  if (!inventoryPanel.hidden) {
+    applyInventoryScrollPositions();
+    showInventoryView(currentInventoryView);
+  }
+  setMessage(game.scene === 'surface' ? game.surface.planet.name : 'Espacio');
+}
+
+async function enterAuthenticatedGame(user) {
+  const loadedGame = await loadAuthenticatedGameState();
+  if (loadedGame.state && !restoreGameState(loadedGame.state)) {
+    throw new Error('No se pudo restaurar la partida guardada.');
+  }
+  refreshGameAfterRestore();
   authReady = true;
   multiplayerPlayerId = user.id;
   multiplayerName = user.username;
@@ -1085,6 +1147,7 @@ function enterAuthenticatedGame(user) {
   accountName.textContent = user.username;
   multiplayerStatus.hidden = false;
   setAuthenticationMessage('');
+  saveGameState(true);
   syncMultiplayer(true);
 }
 
@@ -1097,7 +1160,7 @@ async function initializeAuthentication() {
   if (!authToken) return;
   try {
     const response = await fetch('/api/auth/me', {
-      headers: { Authorization: `Bearer ${authToken}` },
+      headers: { Authorization: 'Bearer ' + authToken },
       cache: 'no-store',
     });
     if (!response.ok) {
@@ -1109,10 +1172,10 @@ async function initializeAuthentication() {
     }
     const result = await response.json();
     if (!result.user?.id || !result.user?.username) throw new Error('Respuesta de sesión inválida.');
-    enterAuthenticatedGame(result.user);
+    await enterAuthenticatedGame(result.user);
   } catch (error) {
     console.error('No se pudo validar la sesión:', error);
-    setAuthenticationMessage('No se pudo conectar con el servidor. Inténtalo otra vez.');
+    setAuthenticationMessage(error.message || 'No se pudo conectar con el servidor. Inténtalo otra vez.');
   }
 }
 
@@ -1146,7 +1209,7 @@ authForm.addEventListener('submit', async (event) => {
     }
     authToken = result.token;
     localStorage.setItem('spaceHeaven.authToken', authToken);
-    enterAuthenticatedGame(result.user);
+    await enterAuthenticatedGame(result.user);
   } catch (error) {
     console.error('No se pudo iniciar sesión:', error);
     setAuthenticationMessage(error.message || 'No se pudo iniciar sesión.');
@@ -1174,7 +1237,7 @@ async function logout() {
   try {
     const response = await fetch('/api/auth/logout', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
+      headers: { Authorization: 'Bearer ' + token },
       cache: 'no-store',
     });
     if (!response.ok && response.status !== 401) {
@@ -1202,14 +1265,14 @@ async function syncMultiplayer(force = false) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${authToken}`,
+        Authorization: 'Bearer ' + authToken,
       },
       body: JSON.stringify(getMultiplayerSnapshot()),
       cache: 'no-store',
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const peersResponse = await fetch(`${multiplayerEndpoint}?self=${encodeURIComponent(multiplayerPlayerId)}`, {
-      headers: { Authorization: `Bearer ${authToken}` },
+      headers: { Authorization: 'Bearer ' + authToken },
       cache: 'no-store',
     });
     if (!peersResponse.ok) throw new Error(`HTTP ${peersResponse.status}`);
@@ -7543,7 +7606,8 @@ function updateMarketPanel() {
   });
 }
 
-function loadGameState() {
+function loadGameState(allowLocalSave = !multiplayerEndpoint) {
+  if (!allowLocalSave) return null;
   let serializedState;
   try {
     serializedState = localStorage.getItem(GAME_SAVE_KEY);
@@ -7557,14 +7621,7 @@ function loadGameState() {
 
   try {
     const savedState = JSON.parse(serializedState);
-    const player = savedState?.player;
-    if (
-      !player ||
-      !Number.isFinite(player.x) ||
-      !Number.isFinite(player.y) ||
-      !Number.isFinite(savedState.time) ||
-      !Number.isFinite(savedState.savedAt)
-    ) {
+    if (!isValidGameState(savedState)) {
       console.error('La partida guardada tiene un formato no válido.');
       return null;
     }
@@ -7714,7 +7771,67 @@ function restoreNavigationState(savedNavigation) {
   }
 }
 
-function saveGameState() {
+function scheduleRemoteGameSave(delay = 0) {
+  if (remoteSaveTimer !== null) window.clearTimeout(remoteSaveTimer);
+  remoteSaveTimer = window.setTimeout(() => {
+    remoteSaveTimer = null;
+    flushRemoteGameSave();
+  }, delay);
+}
+
+async function flushRemoteGameSave(keepalive = false) {
+  if (!remoteSavePending || remoteSaveInFlight || !authToken || !multiplayerEndpoint) return;
+  if (remoteSaveTimer !== null) {
+    window.clearTimeout(remoteSaveTimer);
+    remoteSaveTimer = null;
+  }
+  const serializedState = remoteSavePending;
+  remoteSavePending = null;
+  remoteSaveInFlight = true;
+  try {
+    const response = await fetch('/api/save', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer ' + authToken,
+      },
+      body: `{"state":${serializedState}}`,
+      cache: 'no-store',
+      keepalive,
+    });
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(result.error || `HTTP ${response.status}`);
+    }
+    lastRemoteSaveAt = Date.now();
+    multiplayerStatus.textContent = multiplayerPlayers.length
+      ? `EN LÍNEA · ${multiplayerPlayers.length + 1} JUGADORES`
+      : 'EN LÍNEA · PARTIDA GUARDADA';
+  } catch (error) {
+    console.error('No se pudo guardar la partida en el servidor:', error);
+    multiplayerStatus.textContent = 'ERROR AL GUARDAR · REINTENTANDO';
+    multiplayerStatus.classList.add('multiplayer-offline');
+    multiplayerStatus.classList.remove('multiplayer-online');
+    if (!remoteSavePending) remoteSavePending = serializedState;
+  } finally {
+    remoteSaveInFlight = false;
+    if (remoteSavePending && authToken) {
+      scheduleRemoteGameSave(Math.max(1000, 5000 - (Date.now() - lastRemoteSaveAt)));
+    }
+  }
+}
+
+function queueRemoteGameSave(serializedState, immediate = false) {
+  remoteSavePending = serializedState;
+  if (immediate) {
+    scheduleRemoteGameSave(0);
+    return;
+  }
+  const delay = Math.max(1000, 5000 - (Date.now() - lastRemoteSaveAt));
+  if (remoteSaveTimer === null) scheduleRemoteGameSave(delay);
+}
+
+function saveGameState(forceRemoteSave = false) {
   if (savingDisabled) return;
   stackMatchingItems(game.player.inventorySlots, false);
   stackMatchingItems(game.player.chestSlots, true);
@@ -7793,9 +7910,14 @@ function saveGameState() {
     };
   }
 
+  const serializedState = JSON.stringify(savedState);
+  lastGameSaveAt = savedAt;
+  if (multiplayerEndpoint) {
+    if (authReady && authToken) queueRemoteGameSave(serializedState, forceRemoteSave);
+    return;
+  }
   try {
-    localStorage.setItem(GAME_SAVE_KEY, JSON.stringify(savedState));
-    lastGameSaveAt = savedAt;
+    localStorage.setItem(GAME_SAVE_KEY, serializedState);
   } catch (error) {
     console.error('No se pudo guardar la partida.', error);
   }
@@ -11800,46 +11922,28 @@ function updateSurfaceAbilityBar() {
 }
 
 // ---------------------------------------------------------------- Menú de pausa (Esc)
-const HUD_SCALES = [0.75, 1, 1.25, 1.5];
-const HUD_SCALE_KEY = 'spaceheaven-hud-scale';
 const gameShell = document.querySelector('.game-shell');
-let hudScaleIndex = 1;
 let pauseMenuOpen = false;
-try {
-  const savedHudScale = HUD_SCALES.indexOf(Number(localStorage.getItem(HUD_SCALE_KEY)));
-  if (savedHudScale >= 0) hudScaleIndex = savedHudScale;
-} catch {
-  // Sin almacenamiento: se usa el tamaño normal.
-}
 
 const pauseMenu = document.createElement('div');
 pauseMenu.className = 'pause-menu';
 pauseMenu.hidden = true;
 pauseMenu.innerHTML = `
   <div class="pause-menu-box" role="dialog" aria-modal="true" aria-label="Menú">
-    <button type="button" class="pause-menu-option" data-action="hud"></button>
-    <button type="button" class="pause-menu-option" data-action="restart">Reiniciar partida</button>
-    <button type="button" class="pause-menu-option" data-action="exit">Salir</button>
+    <button type="button" class="pause-menu-option" data-action="resume">Reanudar</button>
+    <button type="button" class="pause-menu-option" data-action="fullscreen"></button>
+    <button type="button" class="pause-menu-option" data-action="logout">Cerrar sesión</button>
     <p class="pause-menu-note" hidden></p>
   </div>`;
 gameShell.append(pauseMenu);
 const pauseMenuButtons = [...pauseMenu.querySelectorAll('.pause-menu-option')];
-const hudScaleButton = pauseMenu.querySelector('[data-action="hud"]');
+const pauseMenuFullscreenButton = pauseMenu.querySelector('[data-action="fullscreen"]');
+const pauseMenuLogoutButton = pauseMenu.querySelector('[data-action="logout"]');
 const pauseMenuNote = pauseMenu.querySelector('.pause-menu-note');
 
-function applyHudScale() {
-  gameShell.style.setProperty('--hud-scale', String(HUD_SCALES[hudScaleIndex]));
-  hudScaleButton.textContent = `Tamaño del HUD: ${Math.round(HUD_SCALES[hudScaleIndex] * 100)}%`;
-}
-
-function changeHudScale(step) {
-  hudScaleIndex = (hudScaleIndex + step + HUD_SCALES.length) % HUD_SCALES.length;
-  applyHudScale();
-  try {
-    localStorage.setItem(HUD_SCALE_KEY, String(HUD_SCALES[hudScaleIndex]));
-  } catch {
-    // La preferencia solo dura esta sesión.
-  }
+function updatePauseMenuOptions() {
+  pauseMenuFullscreenButton.textContent = `Pantalla completa: ${document.fullscreenElement ? 'Sí' : 'No'}`;
+  pauseMenuLogoutButton.textContent = authToken ? 'Cerrar sesión' : 'Salir';
 }
 
 function openPauseMenu() {
@@ -11847,6 +11951,7 @@ function openPauseMenu() {
   pauseMenuOpen = true;
   game.keys = {};
   game.pointer.isDown = false;
+  updatePauseMenuOptions();
   pauseMenuNote.hidden = true;
   pauseMenu.hidden = false;
   pauseMenuButtons[0].focus();
@@ -11881,22 +11986,35 @@ function exitGame() {
   }, 200);
 }
 
-pauseMenu.addEventListener('click', (event) => {
+pauseMenu.addEventListener('click', async (event) => {
   const button = event.target.closest('[data-action]');
   if (!button) return;
   const action = button.dataset.action;
-  if (action === 'hud') changeHudScale(1);
-  else if (action === 'restart') {
-    askConfirm('¿Reiniciar la partida desde cero? Se borrará todo tu progreso.', restartGame);
-  } else if (action === 'exit') exitGame();
+  if (action === 'resume') {
+    closePauseMenu();
+  } else if (action === 'fullscreen') {
+    pauseMenuNote.hidden = true;
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await gameShell.requestFullscreen();
+      updatePauseMenuOptions();
+    } catch (error) {
+      console.error('No se pudo cambiar el modo de pantalla completa:', error);
+      pauseMenuNote.textContent = 'No se pudo cambiar el modo de pantalla completa.';
+      pauseMenuNote.hidden = false;
+    }
+  } else if (action === 'logout') {
+    if (authToken) await logout();
+    else exitGame();
+  }
 });
+document.addEventListener('fullscreenchange', updatePauseMenuOptions);
 // El ratón y el teclado comparten la misma opción resaltada.
 for (const button of pauseMenuButtons) {
   button.addEventListener('mouseenter', () => button.focus());
 }
 pauseMenu.addEventListener('pointerdown', (event) => event.stopPropagation());
 pauseMenu.addEventListener('wheel', (event) => event.stopPropagation(), { passive: true });
-applyHudScale();
 
 function frame(timestamp) {
   const delta = Math.min((timestamp - game.lastTime) / 1000 || 0.016, 0.032);
@@ -11929,14 +12047,18 @@ function frame(timestamp) {
 window.addEventListener('keydown', (event) => {
   const key = event.key.toLowerCase();
 
-  if (key === 'escape' && authToken) {
-    event.preventDefault();
-    if (!event.repeat) logout();
-    return;
-  }
   if (!authReady) {
     if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(key)) {
       event.preventDefault();
+    }
+    return;
+  }
+
+  if (key === 'escape') {
+    event.preventDefault();
+    if (!event.repeat) {
+      if (pauseMenuOpen) closePauseMenu();
+      else openPauseMenu();
     }
     return;
   }
@@ -11975,9 +12097,6 @@ window.addEventListener('keydown', (event) => {
       const current = pauseMenuButtons.indexOf(document.activeElement);
       const step = key === 'arrowdown' ? 1 : -1;
       pauseMenuButtons[(current + step + pauseMenuButtons.length) % pauseMenuButtons.length].focus();
-    } else if ((key === 'arrowleft' || key === 'arrowright') && document.activeElement === hudScaleButton) {
-      event.preventDefault();
-      changeHudScale(key === 'arrowright' ? 1 : -1);
     }
     return;
   }
@@ -11991,18 +12110,6 @@ window.addEventListener('keydown', (event) => {
   if (key === 'i' && !event.repeat) {
     event.preventDefault();
     toggleInventory();
-    return;
-  }
-
-  if (key === 'escape' && !inventoryPanel.hidden) {
-    event.preventDefault();
-    toggleInventory(false);
-    return;
-  }
-
-  if (key === 'escape') {
-    event.preventDefault();
-    if (!event.repeat) openPauseMenu();
     return;
   }
 
@@ -12505,8 +12612,10 @@ inventoryMap.addEventListener('click', (event) => {
 });
 
 closeInventoryBtn.addEventListener('click', () => toggleInventory(false));
-window.addEventListener('pagehide', saveGameState);
-window.addEventListener('beforeunload', saveGameState);
+window.addEventListener('pagehide', () => {
+  saveGameState(true);
+  flushRemoteGameSave(true);
+});
 
 updateVisibleChunks();
 updatePlanetPositions();

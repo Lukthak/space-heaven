@@ -16,9 +16,11 @@ En esta PC abre:
 http://localhost:8000
 ```
 
-Otra persona conectada a la misma red Wi-Fi debe abrir `http://IP-DE-ESTA-PC:8000`. La conexión sincroniza las naves, los jugadores, el chat, los NPC y los recursos del suelo en cada planeta. El inventario, las misiones, los enemigos y la economía siguen siendo locales en esta primera versión.
+Otra persona conectada a la misma red Wi-Fi debe abrir `http://IP-DE-ESTA-PC:8000`. La conexión sincroniza las naves, los jugadores, el chat, los NPC y los recursos del suelo en cada planeta.
 
-El juego en línea requiere una cuenta: inicia sesión o regístrate en la pantalla inicial. Pulsa `Esc` en cualquier momento para cerrar sesión.
+El juego en línea requiere una cuenta: inicia sesión o regístrate en la pantalla inicial. La posición, el inventario y el progreso se guardan por cuenta en el servidor y se recuperan al iniciar sesión. Si la cuenta todavía no tiene una partida remota, se migra su guardado local una sola vez. Pulsa `Esc` para abrir el menú negro con las opciones `Reanudar`, `Pantalla completa: Sí/No` y `Cerrar sesión`.
+
+El servidor guarda las cuentas y las partidas en `data/` (o en la ruta indicada por `SPACEHEAVEN_DATA_DIR`). En un hosting con disco efímero, configura un disco persistente y apunta `SPACEHEAVEN_DATA_DIR` a su punto de montaje para conservar los datos después de reinicios o despliegues.
 
 ## Contenido
 
@@ -33,9 +35,9 @@ El juego en línea requiere una cuenta: inicia sesión o regístrate en la panta
 - Planetas renderizados en pixel art cuadrado 16×16, sin deformar su proporción; las superficies son lisas y usan verde para Tierra y el color propio de cada otro planeta
 - Nave centrada en cámara, con aceleración, inercia, frenado gradual y orientación según el movimiento
 - En multijugador se comparten el color elegido, los disparos visibles y los impactos entre jugadores en el mismo planeta o en el espacio
-- El juego en línea pide iniciar sesión o crear una cuenta; `Esc` cierra la sesión
+- El juego en línea pide iniciar sesión o crear una cuenta; `Esc` abre el menú de pausa y la opción `Cerrar sesión` termina la sesión
 - Aterrizaje automático al alcanzar un planeta con el autopiloto; Enter también permite aterrizar manualmente o despegar
-- La última ubicación se guarda localmente, incluso si se cierra el juego mientras se está en la superficie de un planeta
+- La última ubicación se guarda en el servidor para cuentas en línea y localmente para partidas sin servidor; también se conserva si se cierra el juego mientras se está en la superficie de un planeta
 - La superficie muestra el suelo liso, la nave modular equipada y el sprite direccional del jugador; cada orientación tiene cuatro cuadros de animación, el cuadro 2 se usa al estar quieto, y para moverse usa la celda azul para arriba, la roja para abajo y la verde para izquierda, que se voltea para mirar a la derecha
 - La Tierra tiene una luna, Luna, que orbita a su alrededor y a la que se puede aterrizar como a cualquier planeta; su superficie solo tiene regolito (precio base 8 créditos), que se recoge con `E` y se vende al comerciante de la Tierra
 - Cada planeta tiene objetos visibles de metal, cristal y combustible; recógelos acercándote y pulsando `E`
@@ -55,12 +57,12 @@ El juego en línea requiere una cuenta: inicia sesión o regístrate en la panta
 - El propulsor eléctrico alcanza la mitad de la velocidad base; el propulsor a gasolina conserva su velocidad triple
 - En la superficie de Tierra hay un comerciante circular: acércate y pulsa `E` para abrir la tienda; solo vende combustible y energía (su stock vuelve a 99 unidades cada cinco minutos), y puedes vender cualquier objeto desde las pestañas del comercio
 - Tierra también tiene un cofre con un camino de mármol; acércate y pulsa `E` para abrirlo, luego arrastra objetos entre tu inventario y el cofre para guardarlos o retirarlos
-- Arrastrar un objeto fuera de las interfaces pregunta si quieres eliminarlo; el contenido del cofre se conserva en el guardado local
+- Arrastrar un objeto fuera de las interfaces pregunta si quieres eliminarlo; el contenido del cofre se conserva en la partida guardada
 - El comerciante vende combustible a 30 créditos y energía a 10 por unidad, y paga las materias primas a la mitad de su valor; los precios base de venta son 15 por metal, 28 por cristal, 20 por combustible y 5 por energía; los recursos recogidos en planetas más alejados aumentan un 20 % por cada 100 unidades orbitales más allá de Tierra, y cada pila conserva su precio incluso al guardar, cargar o vender parcialmente
 - Los paneles solares ya no dan energía infinita: generan 1 stack (32) de energía cada 2 minutos mientras estén equipados, hasta un máximo de 3 stacks de energía en el inventario (con 3 stacks dejan de generar)
 - Las piezas de nave tienen sus propios precios; las piezas equipadas no se pueden vender
 - En la Tierra hay una mesa de trabajo (`E` para abrirla): fabrica piezas de nave y el detector de enemigos con los recursos del inventario, gastando primero las unidades más baratas. Incluye las piezas ya existentes y piezas nuevas (centro reforzado, propulsor de amoniaco, alas de titanio y de grafeno, puntas de cobalto y de plasma) que solo se consiguen fabricándolas
-- Las piezas equipadas, el inventario, el precio de cada pila de recursos, los créditos y las cantidades de combustible y energía se conservan en el guardado local
+- Las piezas equipadas, el inventario, el precio de cada pila de recursos, los créditos y las cantidades de combustible y energía se conservan en la partida guardada
 
 ## Pantalla y controles
 
@@ -74,7 +76,7 @@ El juego en línea requiere una cuenta: inicia sesión o regístrate en la panta
 - Al pasar el cursor sobre un punto del mapa aparece el nombre del objeto; al hacer clic en un planeta, la nave lo sigue hasta alcanzarlo, y al hacer clic en otro punto, viaja a esa posición
 - El mapa muestra una cuadrícula verde por chunks; al mover el cursor indica las coordenadas de la zona y permite alejar la vista hasta cuatro veces más que antes
 - El autopilot sigue activo y la nave continúa su viaje mientras el inventario está abierto
-- `Escape`: cerrar el inventario; si no hay nada abierto, abre el menú de pausa (pantalla negra que detiene el juego) con tres opciones: tamaño del HUD (75 %, 100 %, 125 % o 150 %, se recuerda aunque reinicies), reiniciar la partida desde cero (pide confirmación y borra el guardado) y salir (guarda la partida y cierra la pestaña si el navegador lo permite). Se navega con el ratón o con las flechas; la opción seleccionada se resalta en amarillo y `Esc` vuelve al juego
+- `Escape`: abrir el menú negro de pausa con `Reanudar`, `Pantalla completa: Sí/No` y `Cerrar sesión`; `Esc` también reanuda el juego mientras el menú esté abierto. Se navega con el ratón o con las flechas y la opción seleccionada se resalta en amarillo
 - Clic en el mundo: navegar la nave; mantener pulsado dirige continuamente hacia el cursor
 - WASD o flechas: acelerar y dirigir la nave
 - En la superficie, WASD o flechas también orientan al jugador; al moverse con el ratón, el sprite mira hacia el destino
