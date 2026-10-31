@@ -18,7 +18,7 @@ http://localhost:8000
 
 Otra persona conectada a la misma red Wi-Fi debe abrir `http://IP-DE-ESTA-PC:8000`. La conexión sincroniza las naves, los jugadores, el chat, los NPC y los recursos del suelo en cada planeta.
 
-El juego en línea requiere una cuenta: inicia sesión o regístrate en la pantalla inicial. La posición, el inventario y el progreso se guardan por cuenta en el servidor y se recuperan al iniciar sesión. Si la cuenta todavía no tiene una partida remota, se migra su guardado local una sola vez. Pulsa `Esc` para abrir el menú negro con las opciones `Reanudar`, `Pantalla completa: Sí/No` y `Cerrar sesión`.
+El juego en línea requiere una cuenta: inicia sesión o regístrate en la pantalla inicial. La posición, el inventario y el progreso se guardan por cuenta en el servidor y se recuperan al iniciar sesión. Si la cuenta todavía no tiene una partida remota, se migra su guardado local una sola vez. Pulsa `Esc` para abrir sobre la partida el menú negro con las opciones `Reanudar`, `Pantalla completa: Sí/No` y `Cerrar sesión`; el mundo sigue avanzando detrás del menú.
 
 El servidor guarda las cuentas y las partidas en `data/` (o en la ruta indicada por `SPACEHEAVEN_DATA_DIR`). En un hosting con disco efímero, configura un disco persistente y apunta `SPACEHEAVEN_DATA_DIR` a su punto de montaje para conservar los datos después de reinicios o despliegues.
 
@@ -35,7 +35,7 @@ El servidor guarda las cuentas y las partidas en `data/` (o en la ruta indicada 
 - Planetas renderizados en pixel art cuadrado 16×16, sin deformar su proporción; las superficies son lisas y usan verde para Tierra y el color propio de cada otro planeta
 - Nave centrada en cámara, con aceleración, inercia, frenado gradual y orientación según el movimiento
 - En multijugador se comparten el color elegido, los disparos visibles y los impactos entre jugadores en el mismo planeta o en el espacio
-- El juego en línea pide iniciar sesión o crear una cuenta; `Esc` abre el menú de pausa y la opción `Cerrar sesión` termina la sesión
+- El juego en línea pide iniciar sesión o crear una cuenta; `Esc` abre el menú sobre la partida sin detener el mundo y la opción `Cerrar sesión` termina la sesión
 - Aterrizaje automático al alcanzar un planeta con el autopiloto; Enter también permite aterrizar manualmente o despegar
 - La última ubicación se guarda en el servidor para cuentas en línea y localmente para partidas sin servidor; también se conserva si se cierra el juego mientras se está en la superficie de un planeta
 - La superficie muestra el suelo liso, la nave modular equipada y el sprite direccional del jugador; cada orientación tiene cuatro cuadros de animación, el cuadro 2 se usa al estar quieto, y para moverse usa la celda azul para arriba, la roja para abajo y la verde para izquierda, que se voltea para mirar a la derecha
@@ -76,7 +76,7 @@ El servidor guarda las cuentas y las partidas en `data/` (o en la ruta indicada 
 - Al pasar el cursor sobre un punto del mapa aparece el nombre del objeto; al hacer clic en un planeta, la nave lo sigue hasta alcanzarlo, y al hacer clic en otro punto, viaja a esa posición
 - El mapa muestra una cuadrícula verde por chunks; al mover el cursor indica las coordenadas de la zona y permite alejar la vista hasta cuatro veces más que antes
 - El autopilot sigue activo y la nave continúa su viaje mientras el inventario está abierto
-- `Escape`: abrir el menú negro de pausa con `Reanudar`, `Pantalla completa: Sí/No` y `Cerrar sesión`; `Esc` también reanuda el juego mientras el menú esté abierto. Se navega con el ratón o con las flechas y la opción seleccionada se resalta en amarillo
+- `Escape`: abrir el menú negro sobre la partida con `Reanudar`, `Pantalla completa: Sí/No` y `Cerrar sesión`; el mundo sigue avanzando y `Esc` reanuda el control del jugador. Se navega con el ratón o con las flechas y la opción seleccionada se resalta en amarillo
 - Clic en el mundo: navegar la nave; mantener pulsado dirige continuamente hacia el cursor
 - WASD o flechas: acelerar y dirigir la nave
 - En la superficie, WASD o flechas también orientan al jugador; al moverse con el ratón, el sprite mira hacia el destino

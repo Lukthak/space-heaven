@@ -12020,15 +12020,13 @@ function frame(timestamp) {
   const delta = Math.min((timestamp - game.lastTime) / 1000 || 0.016, 0.032);
   game.lastTime = timestamp;
 
-  // Con el menú abierto el juego queda en pausa (solo se sigue dibujando).
-  if (!pauseMenuOpen) {
-    game.time += delta;
-    update(delta);
-    updateMultiplayerInterpolation(delta);
-    updateSolarPanels(delta);
-    if (game.scene === 'space') updateShootingStars(delta);
-    updateSpaceHudOpacity(delta);
-  }
+  // El menú es una capa visual: el mundo y el resto de jugadores siguen avanzando debajo.
+  game.time += delta;
+  update(delta);
+  updateMultiplayerInterpolation(delta);
+  updateSolarPanels(delta);
+  if (game.scene === 'space') updateShootingStars(delta);
+  updateSpaceHudOpacity(delta);
   updateShipAbilityBar();
   draw();
   if (!inventoryPanel.hidden && currentInventoryView === 'mapa') {
