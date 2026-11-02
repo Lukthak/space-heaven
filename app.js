@@ -1,6 +1,14 @@
 const canvas = document.getElementById('gameCanvas');
 let ctx = canvas.getContext('2d');
 let lunaFisheyeBuffers = null;
+const mobileJoystick = document.getElementById('mobileJoystick');
+const mobileJoystickBase = mobileJoystick.querySelector('.mobile-joystick-base');
+const mobileJoystickStick = mobileJoystick.querySelector('.mobile-joystick-stick');
+const coarsePointerQuery = window.matchMedia('(pointer: coarse)');
+const mobilePhone = navigator.userAgentData?.mobile ??
+  /iPhone|iPod|Android.*Mobile|Windows Phone|IEMobile/i.test(navigator.userAgent);
+let mobileJoystickInput = { x: 0, y: 0 };
+let mobileJoystickPointerId = null;
 
 const creditsEl = document.getElementById('credits');
 const messageEl = document.getElementById('message');
@@ -192,13 +200,14 @@ const MIN_INVENTORY_MAP_ZOOM = 0.0625;
 const MAX_INVENTORY_MAP_ZOOM = 8;
 const PARALLAX_CELL_SIZE = 800;
 const PARALLAX_DIVISOR = 192;
-const SHIP_ACCELERATION = 520;
-const TAKEOFF_KICK_SPEED = 180;
+const SPACE_SHIP_SPEED_SCALE = 0.5;
+const SHIP_ACCELERATION = 520 * SPACE_SHIP_SPEED_SCALE;
+const TAKEOFF_KICK_SPEED = 180 * SPACE_SHIP_SPEED_SCALE;
 const SHIP_TURN_RATE = 1.8;
 const SHIP_BRAKING = 240;
 const SHIP_DRIFT_BRAKING = 300;
 // Sin pilotaje la nave nunca se detiene del todo: conserva una deriva suave en su último rumbo (Espacio la frena).
-const SHIP_IDLE_DRIFT_SPEED = 8;
+const SHIP_IDLE_DRIFT_SPEED = 8 * SPACE_SHIP_SPEED_SCALE;
 // Paneles solares: 1 stack de energía cada 2 minutos, hasta 3 stacks en el inventario.
 const SOLAR_PANEL_INTERVAL = 120;
 
@@ -3553,7 +3562,8 @@ function getLatestMovementInput() {
       latestOrder = game.movementKeyOrder[key] ?? 0;
     }
   }
-  return latestKey ? MOVEMENT_KEY_DIRECTIONS[latestKey] : { x: 0, y: 0 };
+  if (latestKey) return MOVEMENT_KEY_DIRECTIONS[latestKey];
+  return mobileJoystickInput;
 }
 
 function createStartingInventorySlots() {
@@ -5161,7 +5171,7 @@ const EMERGENCY_DELIVERY_COST = 1000;
 const EMERGENCY_TOW_MIN_COST = 500;
 const EMERGENCY_TOW_MAX_COST = 5000;
 const EMERGENCY_DELIVERY_STACKS = 3;
-const EMERGENCY_SERVICE_SPEED = 1400;
+const EMERGENCY_SERVICE_SPEED = 1400 * SPACE_SHIP_SPEED_SCALE;
 
 function getEmergencyTowCost() {
   const solarPlanets = game.homeStar?.planets ?? [];
@@ -5896,7 +5906,8 @@ function getEquippedShipStats() {
 
   return {
     maxSpeed: equippedPropulsor
-      ? game.player.speed * wingSpeedMultiplier * (equippedPropulsor.stats?.speedMultiplier ?? 1) * getActivePropulsionBoostMultiplier()
+      ? game.player.speed * wingSpeedMultiplier * (equippedPropulsor.stats?.speedMultiplier ?? 1) *
+        getActivePropulsionBoostMultiplier() * SPACE_SHIP_SPEED_SCALE
       : 0,
     inventoryStackCapacity: Math.max(
       1,
@@ -8633,7 +8644,8 @@ function spawnHostileDrone() {
   const propulsor = getShipPart(shipParts.propulsor);
   const tipStats = partStats.tip;
   const stats = {
-    maxSpeed: game.player.speed * wingSpeedMultiplier * (propulsor?.stats?.speedMultiplier ?? 1),
+    maxSpeed: game.player.speed * wingSpeedMultiplier * (propulsor?.stats?.speedMultiplier ?? 1) *
+      SPACE_SHIP_SPEED_SCALE,
     acceleration: SHIP_ACCELERATION,
     maxHealth,
     fuelConsumptionDistance: propulsor?.stats?.fuelConsumptionDistance ?? Infinity,
@@ -9612,7 +9624,10 @@ function updateEmergencyReturn(dt) {
       }
     }
     const maxSpeed = towShip.stats?.maxSpeed ?? towShip.speed ?? EMERGENCY_SERVICE_SPEED;
-    const towSpeed = Math.min(maxSpeed * boostMultiplier, Math.max(80, (shipDistance - arrivalDistance) * 1.2));
+    const towSpeed = Math.min(
+      maxSpeed * boostMultiplier,
+      Math.max(80 * SPACE_SHIP_SPEED_SCALE, (shipDistance - arrivalDistance) * 1.2 * SPACE_SHIP_SPEED_SCALE)
+    );
     const orbitalVelocity = getPlanetVelocity(homeworld);
     towShip.velocityX = orbitalVelocity.x + directionX * towSpeed;
     towShip.velocityY = orbitalVelocity.y + directionY * towSpeed;
@@ -9652,8 +9667,8 @@ function updateEmergencyReturn(dt) {
   const directionX = dx / (distance || 1);
   const directionY = dy / (distance || 1);
   const capsuleSpeedScale = game.emergencyCapsule?.stage === 2 ? SECOND_CAPSULE_SPEED_MULTIPLIER : 1;
-  const emergencyMaxSpeed = 1350 * capsuleSpeedScale;
-  const emergencyAcceleration = 1800 * capsuleSpeedScale;
+  const emergencyMaxSpeed = 1350 * capsuleSpeedScale * SPACE_SHIP_SPEED_SCALE;
+  const emergencyAcceleration = 1800 * capsuleSpeedScale * SPACE_SHIP_SPEED_SCALE;
   const desiredSpeed = Math.min(
     emergencyMaxSpeed,
     Math.sqrt(2 * emergencyAcceleration * Math.max(0, distance - arrivalDistance))
@@ -9684,6 +9699,7 @@ function updateEmergencyReturn(dt) {
 }
 
 function update(dt) {
+  updateMobileJoystickVisibility();
   updateRegolitoGunReload();
   updateMerchantStock();
   updateEmergencyService(dt);
@@ -9705,7 +9721,8 @@ function update(dt) {
   const movementInput = controlsEnabled ? getLatestMovementInput() : { x: 0, y: 0 };
   const keyMoveX = movementInput.x;
   const keyMoveY = movementInput.y;
-  const hasKeyboardInput = keyMoveX !== 0 || keyMoveY !== 0;
+  const hasKeyboardInput = Object.keys(MOVEMENT_KEY_DIRECTIONS).some((key) => game.keys[key]);
+  const hasMovementInput = keyMoveX !== 0 || keyMoveY !== 0;
 
   if (game.scene === 'surface') {
     game.pointer.isDown = false;
@@ -9820,7 +9837,7 @@ function update(dt) {
       }
     }
     if (surf.autoDeparture && controlsEnabled) {
-      if (hasKeyboardInput) {
+      if (hasMovementInput) {
         surf.autoDeparture = null;
       } else {
         // El autopilot sigue la ruta por casillas y no hereda impulsos diagonales previos.
@@ -9900,7 +9917,7 @@ function update(dt) {
         const toY = wrapSurfaceCoordinate(surf.y + stepY * SURFACE_TILE);
         if (isSurfaceTileBlocked(toX, toY, surf.x, surf.y)) {
           bumped = true;
-        if (surf.autoDeparture && !hasKeyboardInput) {
+        if (surf.autoDeparture && !hasMovementInput) {
           surf.autoPathAvoidTile = { x: toX, y: toY, until: game.time + 3 };
           surf.autoPathSearchRadiusTiles = Math.max(64, surf.autoPathSearchRadiusTiles ?? 32);
           surf.autoPathRetryAt = game.time;
@@ -9935,7 +9952,7 @@ function update(dt) {
 
     // Como en Pokémon: al chocar, el personaje mira hacia el obstáculo y "camina" en el sitio.
     surf.bumping = bumped && !surf.isMoving;
-    if (surf.bumping && !hasKeyboardInput && !game.pointer.isDown && game.pointer.moveTarget) {
+    if (surf.bumping && !hasMovementInput && !game.pointer.isDown && game.pointer.moveTarget) {
       game.pointer.moveTarget = null;
       game.pointer.followPlanet = null;
     }
@@ -9970,7 +9987,7 @@ function update(dt) {
 
   let moveX = keyMoveX;
   let moveY = keyMoveY;
-  if (controlsEnabled && !hasKeyboardInput && game.pointer.isDown) {
+  if (controlsEnabled && !hasMovementInput && game.pointer.isDown) {
     moveX = game.pointer.x - game.width / 2;
     moveY = game.pointer.y - game.height / 2;
   }
@@ -9986,7 +10003,7 @@ function update(dt) {
   const currentMaxSpeed = shipStats.maxSpeed * propulsionBoostMultiplier;
   const brakeHeld = controlsEnabled && Boolean(game.keys[' ']);
   let idleCoasting = false;
-  const mouseFlightInput = controlsEnabled && !hasKeyboardInput && !hasAutopilot &&
+  const mouseFlightInput = controlsEnabled && !hasMovementInput && !hasAutopilot &&
     game.pointer.isDown && inputLength > 1;
   const manualFlightInput = controlsEnabled && (hasKeyboardInput || mouseFlightInput) && !hasAutopilot;
   let manualTurnDelta = 0;
@@ -10047,7 +10064,7 @@ function update(dt) {
   } else if (
     hasPropulsor &&
     !brakeHeld &&
-    !hasKeyboardInput &&
+    !hasMovementInput &&
     !game.pointer.isDown &&
     (game.pointer.followPlanet || game.pointer.moveTarget)
   ) {
@@ -12332,6 +12349,78 @@ function getCanvasPointerPosition(event) {
     y: clamp(((event.clientY - bounds.top) / bounds.height) * game.height, 0, game.height),
   };
 }
+
+function resetMobileJoystick() {
+  const pointerId = mobileJoystickPointerId;
+  mobileJoystickPointerId = null;
+  mobileJoystickInput = { x: 0, y: 0 };
+  mobileJoystickStick.style.transform = 'translate(-50%, -50%)';
+  if (pointerId !== null && mobileJoystick.hasPointerCapture(pointerId)) {
+    mobileJoystick.releasePointerCapture(pointerId);
+  }
+}
+
+function updateMobileJoystickVisibility() {
+  const shouldShow = mobilePhone && coarsePointerQuery.matches && authReady && authGate.hidden &&
+    inventoryPanel.hidden && chatComposer.hidden && !pauseMenuOpen &&
+    !confirmState && !earthWandererDialogOpen && !game.emergencyReturn;
+  mobileJoystick.hidden = !shouldShow;
+  if (!shouldShow && mobileJoystickPointerId !== null) resetMobileJoystick();
+}
+
+function updateMobileJoystickFromPointer(event) {
+  const bounds = mobileJoystickBase.getBoundingClientRect();
+  const stickRadius = mobileJoystickStick.getBoundingClientRect().width / 2;
+  const radius = Math.max(1, Math.min(bounds.width, bounds.height) / 2 - stickRadius);
+  const deltaX = event.clientX - (bounds.left + bounds.width / 2);
+  const deltaY = event.clientY - (bounds.top + bounds.height / 2);
+  const distance = Math.hypot(deltaX, deltaY);
+  const scale = distance > radius ? radius / distance : 1;
+  const offsetX = deltaX * scale;
+  const offsetY = deltaY * scale;
+  const normalizedX = offsetX / radius;
+  const normalizedY = offsetY / radius;
+  const magnitude = Math.hypot(normalizedX, normalizedY);
+  const deadZone = 0.16;
+  const outputMagnitude = magnitude <= deadZone
+    ? 0
+    : Math.min(1, (magnitude - deadZone) / (1 - deadZone));
+  const outputScale = magnitude > 0 ? outputMagnitude / magnitude : 0;
+  mobileJoystickInput = {
+    x: normalizedX * outputScale,
+    y: normalizedY * outputScale,
+  };
+  mobileJoystickStick.style.transform =
+    `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px))`;
+}
+
+mobileJoystick.addEventListener('pointerdown', (event) => {
+  if (mobileJoystick.hidden || event.pointerType === 'mouse' || mobileJoystickPointerId !== null) return;
+  event.preventDefault();
+  event.stopPropagation();
+  mobileJoystickPointerId = event.pointerId;
+  mobileJoystick.setPointerCapture(event.pointerId);
+  game.pointer.moveTarget = null;
+  game.pointer.followPlanet = null;
+  game.pointer.isDown = false;
+  updateMobileJoystickFromPointer(event);
+});
+
+mobileJoystick.addEventListener('pointermove', (event) => {
+  if (event.pointerId !== mobileJoystickPointerId) return;
+  event.preventDefault();
+  updateMobileJoystickFromPointer(event);
+});
+
+function finishMobileJoystickPointer(event) {
+  if (event.pointerId === mobileJoystickPointerId) resetMobileJoystick();
+}
+
+mobileJoystick.addEventListener('pointerup', finishMobileJoystickPointer);
+mobileJoystick.addEventListener('pointercancel', finishMobileJoystickPointer);
+mobileJoystick.addEventListener('lostpointercapture', finishMobileJoystickPointer);
+coarsePointerQuery.addEventListener('change', updateMobileJoystickVisibility);
+window.addEventListener('resize', updateMobileJoystickVisibility);
 
 canvas.addEventListener('pointerdown', (event) => {
   if (event.button !== 0 || !inventoryPanel.hidden) {

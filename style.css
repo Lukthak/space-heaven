@@ -116,6 +116,49 @@ body {
   background: #040a08;
 }
 
+.mobile-joystick[hidden] {
+  display: none;
+}
+
+.mobile-joystick {
+  position: absolute;
+  z-index: 4;
+  bottom: max(14px, env(safe-area-inset-bottom));
+  left: max(12px, env(safe-area-inset-left));
+  display: grid;
+  width: 124px;
+  height: 124px;
+  place-items: center;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.mobile-joystick-base {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border: 2px solid rgba(123, 255, 164, 0.62);
+  border-radius: 50%;
+  background: rgba(3, 18, 9, 0.48);
+  box-shadow: inset 0 0 18px rgba(57, 255, 117, 0.12), 0 0 12px rgba(0, 0, 0, 0.4);
+  pointer-events: none;
+}
+
+.mobile-joystick-stick {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 54px;
+  height: 54px;
+  border: 2px solid rgba(194, 255, 209, 0.9);
+  border-radius: 50%;
+  background: rgba(57, 255, 117, 0.36);
+  box-shadow: inset 0 0 12px rgba(57, 255, 117, 0.28);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+
 #gameCanvas {
   display: block;
   width: 100%;
@@ -366,6 +409,32 @@ body {
   .chat-input {
     padding: 11px;
     font-size: 12px;
+  }
+}
+
+@media (pointer: coarse) and (max-width: 600px) {
+  .ship-abilities {
+    right: max(12px, env(safe-area-inset-right));
+    bottom: max(14px, env(safe-area-inset-bottom));
+    left: auto;
+    gap: 5px;
+    transform: scale(var(--hud-scale, 1));
+    transform-origin: bottom right;
+  }
+
+  .game-shell .ship-ability {
+    width: 48px;
+    height: 48px;
+  }
+
+  .mobile-joystick {
+    width: 116px;
+    height: 116px;
+  }
+
+  .mobile-joystick-stick {
+    width: 50px;
+    height: 50px;
   }
 }
 

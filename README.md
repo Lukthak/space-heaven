@@ -57,6 +57,7 @@ El panel administrativo se abre con `/tabla` después de activar los comandos de
 - La vista de nave muestra las cantidades de energía y combustible disponibles en el inventario
 - Debajo de la vista previa aparecen solo la velocidad máxima, el combustible en el inventario y los stacks ocupados/capacidad; el combustible no tiene un límite de tanque y su espacio depende de la capacidad de stacks, las alas rápidas aumentan la velocidad un 10 %, el propulsor a gasolina triplica la velocidad y consume una unidad cada 4000 unidades recorridas, y el propulsor eléctrico consume una unidad de energía cada 1000 unidades
 - El propulsor eléctrico alcanza la mitad de la velocidad base; el propulsor a gasolina conserva su velocidad triple
+- Las velocidades máximas, aceleración, impulso de despegue, deriva y velocidades de naves de ayuda, enemigos y cápsulas en el espacio se reducen globalmente a la mitad; las órbitas planetarias no cambian
 - En la superficie de Tierra hay un comerciante circular: acércate y pulsa `E` para abrir la tienda; solo vende combustible y energía (su stock vuelve a 99 unidades cada cinco minutos), y puedes vender cualquier objeto desde las pestañas del comercio
 - Tierra también tiene un cofre con un camino de mármol; acércate y pulsa `E` para abrirlo, luego arrastra objetos entre tu inventario y el cofre para guardarlos o retirarlos
 - Arrastrar un objeto fuera de las interfaces pregunta si quieres eliminarlo; el contenido del cofre se conserva en la partida guardada
@@ -82,6 +83,7 @@ El panel administrativo se abre con `/tabla` después de activar los comandos de
 - Clic en el mundo: navegar la nave; mantener pulsado dirige continuamente hacia el cursor
 - WASD o flechas: acelerar y dirigir la nave
 - En la superficie, WASD o flechas también orientan al jugador; al moverse con el ratón, el sprite mira hacia el destino
+- Solo en teléfonos con pantalla táctil aparece un joystick en la esquina inferior izquierda para mover al personaje en la superficie y dirigir la nave en el espacio; no aparece en tablets ni en computadoras táctiles
 - En el espacio, al soltar el movimiento la nave desacelera hasta una deriva muy suave y sigue avanzando para siempre hacia donde iba, sin gastar combustible ni energía; mantén `Espacio` para frenarla del todo
 - Enter: aterrizar cerca de un planeta; cerca de la nave, despegar
 - `E`: recoger el objeto cercano; junto al comerciante abre la tienda y junto al cofre de Tierra abre el almacenamiento
