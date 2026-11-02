@@ -9,6 +9,7 @@ const mobilePhone = navigator.userAgentData?.mobile ??
   /iPhone|iPod|Android.*Mobile|Windows Phone|IEMobile/i.test(navigator.userAgent);
 let mobileJoystickInput = { x: 0, y: 0 };
 let mobileJoystickPointerId = null;
+let mobileJoystickAxis = null;
 
 const creditsEl = document.getElementById('credits');
 const messageEl = document.getElementById('message');
@@ -12354,6 +12355,7 @@ function resetMobileJoystick() {
   const pointerId = mobileJoystickPointerId;
   mobileJoystickPointerId = null;
   mobileJoystickInput = { x: 0, y: 0 };
+  mobileJoystickAxis = null;
   mobileJoystickStick.style.transform = 'translate(-50%, -50%)';
   if (pointerId !== null && mobileJoystick.hasPointerCapture(pointerId)) {
     mobileJoystick.releasePointerCapture(pointerId);
@@ -12382,14 +12384,23 @@ function updateMobileJoystickFromPointer(event) {
   const normalizedY = offsetY / radius;
   const magnitude = Math.hypot(normalizedX, normalizedY);
   const deadZone = 0.16;
-  const outputMagnitude = magnitude <= deadZone
-    ? 0
-    : Math.min(1, (magnitude - deadZone) / (1 - deadZone));
-  const outputScale = magnitude > 0 ? outputMagnitude / magnitude : 0;
-  mobileJoystickInput = {
-    x: normalizedX * outputScale,
-    y: normalizedY * outputScale,
-  };
+  if (magnitude <= deadZone) {
+    mobileJoystickInput = { x: 0, y: 0 };
+    mobileJoystickAxis = null;
+  } else {
+    const horizontalStrength = Math.abs(normalizedX);
+    const verticalStrength = Math.abs(normalizedY);
+    if (
+      !mobileJoystickAxis ||
+      (mobileJoystickAxis === 'horizontal' && verticalStrength > horizontalStrength * 1.2) ||
+      (mobileJoystickAxis === 'vertical' && horizontalStrength > verticalStrength * 1.2)
+    ) {
+      mobileJoystickAxis = horizontalStrength > verticalStrength ? 'horizontal' : 'vertical';
+    }
+    mobileJoystickInput = mobileJoystickAxis === 'horizontal'
+      ? { x: Math.sign(normalizedX), y: 0 }
+      : { x: 0, y: Math.sign(normalizedY) };
+  }
   mobileJoystickStick.style.transform =
     `translate(calc(-50% + ${offsetX}px), calc(-50% + ${offsetY}px))`;
 }
