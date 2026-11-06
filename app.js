@@ -150,6 +150,7 @@ const MULTIPLAYER_PICKUP_SYNC = Symbol('multiplayerPickupSync');
 const PLANET_PICKUP_REGION_CHUNKS = 10;
 const PLANET_PICKUP_REGION_RADIUS_CHUNKS = 8;
 const MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS = 8;
+const MARTIAN_ENEMY_HOVERBOARD_SPAWN_RADIUS_CHUNKS = 4;
 let multiplayerSpaceOwnerId = '';
 let multiplayerIsSpaceOwner = false;
 let multiplayerEarthWandererTarget = null;
@@ -2103,6 +2104,7 @@ function canSpawnMartianEnemyAt(x, y) {
 }
 
 function findMartianEnemySpawnPoint(distanceTiles = null, requireMountain = true, preferredDirection = null) {
+  const ridingHoverboard = Boolean(game.player.hoverboardEquipped);
   const preferredAngle = preferredDirection && (preferredDirection.x || preferredDirection.y)
     ? Math.atan2(preferredDirection.y, preferredDirection.x)
     : null;
@@ -2121,9 +2123,18 @@ function findMartianEnemySpawnPoint(distanceTiles = null, requireMountain = true
       const angle = phase.preferred
         ? preferredAngle + (((attempt + Math.random()) / attempts) - 0.5) * Math.PI * 0.55
         : (attempt + Math.random()) / attempts * Math.PI * 2;
-      const maxSpawnDistanceTiles = Math.floor(CHUNK_SIZE * MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS / SURFACE_TILE);
+      const spawnRadiusChunks = ridingHoverboard
+        ? MARTIAN_ENEMY_HOVERBOARD_SPAWN_RADIUS_CHUNKS
+        : MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS;
+      const maxSpawnDistanceTiles = Math.floor(CHUNK_SIZE * spawnRadiusChunks / SURFACE_TILE);
+      const minSpawnDistanceTiles = ridingHoverboard
+        ? Math.floor(CHUNK_SIZE * 1.5 / SURFACE_TILE)
+        : 25;
       const distance = distanceTiles === null
-        ? SURFACE_TILE * (25 + Math.random() * Math.max(1, maxSpawnDistanceTiles - 25))
+        ? SURFACE_TILE * (
+          minSpawnDistanceTiles +
+          Math.random() * Math.max(1, maxSpawnDistanceTiles - minSpawnDistanceTiles)
+        )
         : SURFACE_TILE * distanceTiles;
       const point = snapSurfacePoint(
         game.surface.x + Math.cos(angle) * distance,
@@ -2632,7 +2643,9 @@ function updateMartianEnemies(dt) {
   if (game.scene !== 'surface' || !game.surface || !(isMars(game.surface.planet) || isLuna(game.surface.planet))) return;
   const currentType = isLuna(game.surface.planet) ? 'lunatic' : 'martian';
   const activeRadius = CHUNK_SIZE * MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS;
-  const desiredEnemyCount = currentType === 'lunatic' ? 6 : 4;
+  const desiredEnemyCount = game.player.hoverboardEquipped
+    ? MARTIAN_ENEMY_SPAWN_LIMIT
+    : currentType === 'lunatic' ? 6 : 4;
   const facingDirections = {
     up: { x: 0, y: -1 }, down: { x: 0, y: 1 },
     left: { x: -1, y: 0 }, right: { x: 1, y: 0 },
