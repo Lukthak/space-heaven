@@ -151,18 +151,20 @@ const PLANET_PICKUP_REGION_CHUNKS = 10;
 const PLANET_PICKUP_REGION_RADIUS_CHUNKS = 8;
 const MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS = 8;
 const MARTIAN_ENEMY_HOVERBOARD_SPAWN_RADIUS_CHUNKS = 4;
-const MARTIAN_ENEMY_SYNC_GRACE_SECONDS = 10;
 let multiplayerSpaceOwnerId = '';
 let multiplayerIsSpaceOwner = false;
 let multiplayerEarthWandererTarget = null;
 let multiplayerMartianTargets = null;
 let multiplayerMartianEnemyTargets = null;
+let multiplayerMartianProjectileTargets = null;
 let multiplayerProjectileSequence = 0;
 const multiplayerCombatEvents = [];
 const multiplayerSpaceEnemyHitEvents = [];
 const multiplayerMartianEnemyDeathEvents = [];
 const processedMultiplayerCombatEvents = new Map();
 const processedMultiplayerSpaceHitResults = new Set();
+const processedMultiplayerMartianProjectileHits = new Set();
+const resolvedMultiplayerMartianProjectiles = new Set();
 const multiplayerSyncedSurfaceEntities = new Set();
 const multiplayerEndpoint = /^https?:$/.test(location.protocol)
   ? `${location.origin}/api/players`
@@ -916,6 +918,13 @@ function sendChatMessage(text) {
       showPlayerChatMessage('/enemy');
       setMessage('¡Aparecieron 3 enemigos cerca de tu nave!');
     } else if (game.scene === 'surface' && (isMars(game.surface?.planet) || isLuna(game.surface?.planet))) {
+      if (multiplayerEndpoint) {
+        showPlayerChatMessage('/enemy');
+        setMessage('En multijugador, el servidor genera y comparte los enemigos.');
+        chatInput.value = '';
+        closeChatComposer();
+        return;
+      }
       const lunatic = isLuna(game.surface.planet);
       const enemy = spawnMartianEnemy(20, lunatic ? 'lunatic' : 'martian');
       if (!enemy) {
@@ -991,8 +1000,33 @@ function getMultiplayerSnapshot() {
         facing: enemy.facing,
         animationFrame: enemy.animationFrame,
         isMoving: enemy.isMoving,
-        shooting: game.time < enemy.shotUntil,
+        shotSequence: enemy.multiplayerShotSequence ?? 0,
+        shotAt: enemy.multiplayerShotAt ?? 0,
       }))
+      : null,
+    martianEnemyObstacles: multiplayerReady &&
+      (isMars(game.surface.planet) || isLuna(game.surface.planet))
+      ? game.martianEnemies.map((enemy) => ({
+        id: enemy.id,
+        blocked: {
+          up: isSurfaceTileBlocked(enemy.x, enemy.y - SURFACE_TILE, enemy.x, enemy.y),
+          right: isSurfaceTileBlocked(enemy.x + SURFACE_TILE, enemy.y, enemy.x, enemy.y),
+          down: isSurfaceTileBlocked(enemy.x, enemy.y + SURFACE_TILE, enemy.x, enemy.y),
+          left: isSurfaceTileBlocked(enemy.x - SURFACE_TILE, enemy.y, enemy.x, enemy.y),
+        },
+        canSeePlayer: getSurfaceDistance(enemy.x, enemy.y, game.surface.x, game.surface.y) <=
+          MARTIAN_ENEMY_SIGHT_RANGE &&
+          hasMartianLineOfSight(enemy.x, enemy.y, game.surface.x, game.surface.y),
+      }))
+      : null,
+    martianProjectileObstacles: multiplayerReady &&
+      (isMars(game.surface.planet) || isLuna(game.surface.planet))
+      ? game.surfaceProjectiles
+        .filter((projectile) => projectile.owner === 'martian' && projectile.multiplayerId)
+        .map((projectile) => ({
+          id: projectile.multiplayerId,
+          blocked: isMarsProjectileBlockedAhead(projectile),
+        }))
       : null,
     deadMartianEnemyIds: multiplayerMartianEnemyDeathEvents.slice(-128),
     collectedPickupIds: [...game.player.collectedPickupIds]
@@ -1593,10 +1627,14 @@ function applySharedSurfaceWorld(dt, blend) {
   const worldKey = game.surface.planet.name.toLowerCase();
   const world = multiplayerWorlds[worldKey];
   if (!world) return;
-  if (multiplayerAppliedWorldRevision !== multiplayerWorldRevision) {
+  const worldRevisionChanged = multiplayerAppliedWorldRevision !== multiplayerWorldRevision;
+  if (worldRevisionChanged) {
     multiplayerEarthWandererTarget = world.earthWanderer || null;
     multiplayerMartianTargets = Array.isArray(world.martianNpcs) ? world.martianNpcs : null;
     multiplayerMartianEnemyTargets = Array.isArray(world.martianEnemies) ? world.martianEnemies : null;
+    multiplayerMartianProjectileTargets = Array.isArray(world.martianProjectiles)
+      ? world.martianProjectiles
+      : [];
     multiplayerAppliedWorldRevision = multiplayerWorldRevision;
   }
 
@@ -1699,10 +1737,24 @@ function applySharedSurfaceWorld(dt, blend) {
   }
 
   if (isMars(game.surface.planet) || isLuna(game.surface.planet)) {
+    for (const hit of world.martianProjectileHits ?? []) {
+      if (
+        hit.playerId !== multiplayerPlayerId ||
+        typeof hit.id !== 'string' ||
+        processedMultiplayerMartianProjectileHits.has(hit.id)
+      ) continue;
+      processedMultiplayerMartianProjectileHits.add(hit.id);
+      if (processedMultiplayerMartianProjectileHits.size > 500) {
+        processedMultiplayerMartianProjectileHits.delete(
+          processedMultiplayerMartianProjectileHits.values().next().value
+        );
+      }
+      damageSurfacePlayer(hit.damage || 1);
+    }
+
     const targets = multiplayerMartianEnemyTargets ?? [];
     const currentEnemies = new Map(game.martianEnemies.map((enemy) => [enemy.id, enemy]));
     const activeTargets = targets.filter((target) => target.hp > 0);
-    const targetIds = new Set(activeTargets.map((target) => target.id));
     const synchronizedEnemies = activeTargets.map((target) => {
       const enemy = currentEnemies.get(target.id) ?? {
         id: target.id,
@@ -1731,28 +1783,68 @@ function applySharedSurfaceWorld(dt, blend) {
         wait: 0.2,
         pathThinkTimer: 0,
         pathDirection: null,
+        multiplayerTargetX: target.x * SURFACE_WORLD_SIZE,
+        multiplayerTargetY: target.y * SURFACE_WORLD_SIZE,
+        multiplayerShotSequence: target.shotSequence ?? 0,
       };
-      enemy.multiplayerPendingUntil = 0;
-      enemy.multiplayerSimulatedHere = target.simulateHere === true;
       enemy.type = target.type;
       enemy.planetName = game.surface.planet.name;
       enemy.runSpeedMultiplier = target.type === 'lunatic' ? 2 : 1;
       enemy.hp = Math.min(enemy.hp, target.hp);
       enemy.maxHp = target.maxHp;
-      if (!enemy.multiplayerSimulatedHere) {
-        enemy.multiplayerTargetX = target.x * SURFACE_WORLD_SIZE;
-        enemy.multiplayerTargetY = target.y * SURFACE_WORLD_SIZE;
-        enemy.facing = target.facing;
-        enemy.isMoving = target.isMoving;
-        if (target.shooting) enemy.shotUntil = game.time + 0.12;
+      enemy.ammo = target.ammo;
+      enemy.maxAmmo = target.maxAmmo;
+      enemy.multiplayerTargetX = target.x * SURFACE_WORLD_SIZE;
+      enemy.multiplayerTargetY = target.y * SURFACE_WORLD_SIZE;
+      enemy.facing = target.facing;
+      enemy.isMoving = target.isMoving;
+      if ((target.shotSequence ?? 0) > (enemy.multiplayerShotSequence ?? 0)) {
+        enemy.shotUntil = game.time + 0.18;
       }
+      enemy.multiplayerShotSequence = target.shotSequence ?? 0;
+      enemy.multiplayerShotAt = target.shotAt ?? 0;
+      if (target.reloading && !enemy.multiplayerReloading) {
+        enemy.reloadStartedAt = game.time;
+      }
+      enemy.multiplayerReloading = target.reloading === true;
+      enemy.reloadUntil = enemy.multiplayerReloading ? game.time + 0.2 : 0;
       return enemy;
     });
-    const pendingEnemies = [...currentEnemies.values()].filter((enemy) =>
-      enemy.multiplayerPendingUntil > game.time &&
-      !targetIds.has(enemy.id)
-    );
-    game.martianEnemies = [...synchronizedEnemies, ...pendingEnemies];
+    game.martianEnemies = synchronizedEnemies;
+
+    if (worldRevisionChanged) {
+      const activeProjectiles = multiplayerMartianProjectileTargets ?? [];
+      const activeProjectileIds = new Set(activeProjectiles.map((projectile) => projectile.id));
+      game.surfaceProjectiles = game.surfaceProjectiles.filter((projectile) =>
+        projectile.owner !== 'martian' ||
+        !projectile.multiplayerId ||
+        activeProjectileIds.has(projectile.multiplayerId)
+      );
+      for (const target of activeProjectiles) {
+        if (resolvedMultiplayerMartianProjectiles.has(target.id)) continue;
+        let projectile = game.surfaceProjectiles.find((entry) =>
+          entry.owner === 'martian' && entry.multiplayerId === target.id
+        );
+        if (!projectile) {
+          projectile = {
+            owner: 'martian',
+            multiplayerId: target.id,
+            damage: target.damage || 1,
+            x: target.x * SURFACE_WORLD_SIZE,
+            y: target.y * SURFACE_WORLD_SIZE,
+            vx: target.vx * SURFACE_WORLD_SIZE,
+            vy: target.vy * SURFACE_WORLD_SIZE,
+            remainingDistance: target.life * Math.hypot(target.vx, target.vy) * SURFACE_WORLD_SIZE,
+          };
+          game.surfaceProjectiles.push(projectile);
+        } else {
+          projectile.x = target.x * SURFACE_WORLD_SIZE;
+          projectile.y = target.y * SURFACE_WORLD_SIZE;
+          projectile.remainingDistance = target.life *
+            Math.hypot(target.vx, target.vy) * SURFACE_WORLD_SIZE;
+        }
+      }
+    }
   }
 }
 
@@ -2172,10 +2264,6 @@ function spawnMartianEnemy(distanceTiles = null, type = 'martian', preferredDire
     runSpeedMultiplier: lunatic ? 2 : 1,
     x: point.x,
     y: point.y,
-    multiplayerSimulatedHere: true,
-    multiplayerPendingUntil: multiplayerReady
-      ? game.time + MARTIAN_ENEMY_SYNC_GRACE_SECONDS
-      : 0,
     hp: MARTIAN_ENEMY_MAX_HEALTH,
     maxHp: MARTIAN_ENEMY_MAX_HEALTH,
     ammo: 6,
@@ -2224,6 +2312,22 @@ function hasMartianLineOfSight(fromX, fromY, toX, toY) {
     if (isMarsMountainCellBlocked(fromX + dx * progress, fromY + dy * progress)) return false;
   }
   return true;
+}
+
+function isMarsProjectileBlockedAhead(projectile) {
+  if (!isMars(game.surface?.planet)) return false;
+  const speed = Math.hypot(projectile.vx, projectile.vy);
+  if (!speed || projectile.remainingDistance <= 0) return false;
+  const distance = Math.min(projectile.remainingDistance, speed * 0.1);
+  const steps = Math.max(1, Math.ceil(distance / (SURFACE_TILE / 2)));
+  for (let step = 1; step <= steps; step += 1) {
+    const progress = step / steps;
+    if (isMarsMountainCellBlocked(
+      projectile.x + projectile.vx / speed * distance * progress,
+      projectile.y + projectile.vy / speed * distance * progress
+    )) return true;
+  }
+  return false;
 }
 
 function getMartianAimFacing(dx, dy) {
@@ -2656,6 +2760,32 @@ function updateMartianEnemy(enemy, dt) {
 
 function updateMartianEnemies(dt) {
   if (game.scene !== 'surface' || !game.surface || !(isMars(game.surface.planet) || isLuna(game.surface.planet))) return;
+  if (multiplayerEndpoint) {
+    if (multiplayerReady) {
+      for (const enemy of game.martianEnemies) {
+        if (Number.isFinite(enemy.multiplayerTargetX) && Number.isFinite(enemy.multiplayerTargetY)) {
+          const blend = 1 - Math.exp(-18 * dt);
+          enemy.x = wrapSurfaceCoordinate(
+            enemy.x + getSurfaceAxisDelta(enemy.multiplayerTargetX, enemy.x) * blend
+          );
+          enemy.y = wrapSurfaceCoordinate(
+            enemy.y + getSurfaceAxisDelta(enemy.multiplayerTargetY, enemy.y) * blend
+          );
+        }
+        if (enemy.isMoving) {
+          enemy.animationTimer += dt;
+          while (enemy.animationTimer >= PLAYER_ANIMATION_FRAME_DURATION) {
+            enemy.animationTimer -= PLAYER_ANIMATION_FRAME_DURATION;
+            enemy.animationFrame = (enemy.animationFrame + 1) % 4;
+          }
+        } else {
+          enemy.animationFrame = 1;
+          enemy.animationTimer = 0;
+        }
+      }
+    }
+    return;
+  }
   const currentType = isLuna(game.surface.planet) ? 'lunatic' : 'martian';
   const activeRadius = CHUNK_SIZE * MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS;
   const desiredEnemyCount = game.player.hoverboardEquipped
@@ -2699,29 +2829,7 @@ function updateMartianEnemies(dt) {
       game.martianEnemies.splice(index, 1);
       continue;
     }
-    if (!multiplayerReady || enemy.multiplayerSimulatedHere) {
-      updateMartianEnemy(enemy, dt);
-    } else {
-      if (Number.isFinite(enemy.multiplayerTargetX) && Number.isFinite(enemy.multiplayerTargetY)) {
-        const blend = 1 - Math.exp(-18 * dt);
-        enemy.x = wrapSurfaceCoordinate(
-          enemy.x + getSurfaceAxisDelta(enemy.multiplayerTargetX, enemy.x) * blend
-        );
-        enemy.y = wrapSurfaceCoordinate(
-          enemy.y + getSurfaceAxisDelta(enemy.multiplayerTargetY, enemy.y) * blend
-        );
-      }
-      if (enemy.isMoving) {
-        enemy.animationTimer += dt;
-        while (enemy.animationTimer >= PLAYER_ANIMATION_FRAME_DURATION) {
-          enemy.animationTimer -= PLAYER_ANIMATION_FRAME_DURATION;
-          enemy.animationFrame = (enemy.animationFrame + 1) % 4;
-        }
-      } else {
-        enemy.animationFrame = 1;
-        enemy.animationTimer = 0;
-      }
-    }
+    updateMartianEnemy(enemy, dt);
   }
 }
 
@@ -10219,6 +10327,11 @@ function update(dt) {
     surf.weaponCooldown = Math.max(0, (surf.weaponCooldown ?? 0) - dt);
     for (let index = game.surfaceProjectiles.length - 1; index >= 0; index -= 1) {
       const projectile = game.surfaceProjectiles[index];
+      if (projectile.multiplayerId &&
+          resolvedMultiplayerMartianProjectiles.has(projectile.multiplayerId)) {
+        game.surfaceProjectiles.splice(index, 1);
+        continue;
+      }
       const speed = Math.hypot(projectile.vx, projectile.vy);
       const distance = Math.min(projectile.remainingDistance, speed * dt);
       const stepCount = Math.max(1, Math.ceil(distance / (SURFACE_TILE / 2)));
@@ -10255,7 +10368,7 @@ function update(dt) {
         }
         if (projectile.owner === 'martian' &&
           getSurfaceDistance(projectile.x, projectile.y, surf.x, surf.y) <= PLAYER_SPRITE_SIZE / 2) {
-          damageSurfacePlayer(projectile.damage ?? 1);
+          if (!multiplayerReady) damageSurfacePlayer(projectile.damage ?? 1);
           hitTarget = true;
           break;
         }
@@ -10277,6 +10390,17 @@ function update(dt) {
         }
       }
       projectile.remainingDistance -= distance;
+      if (
+        projectile.multiplayerId &&
+        (hitMountain || hitTarget || projectile.remainingDistance <= 0)
+      ) {
+        resolvedMultiplayerMartianProjectiles.add(projectile.multiplayerId);
+        if (resolvedMultiplayerMartianProjectiles.size > 1000) {
+          resolvedMultiplayerMartianProjectiles.delete(
+            resolvedMultiplayerMartianProjectiles.values().next().value
+          );
+        }
+      }
       if (hitMountain || hitTarget || projectile.remainingDistance <= 0) game.surfaceProjectiles.splice(index, 1);
     }
     const reloadingGun = game.player.regolitoGunReloadUntil > game.time;

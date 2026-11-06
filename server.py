@@ -6,6 +6,7 @@ import hmac
 import json
 import math
 import os
+import random
 import re
 import secrets
 import tempfile
@@ -25,8 +26,16 @@ WORLD_SAVE_INTERVAL_SECONDS = 1
 MAX_SHARED_PLANET_PICKUPS = 10_000
 MAX_SHARED_MARTIAN_ENEMIES = 100
 PICKUP_VISIBILITY_RADIUS = 0.12
-MARTIAN_ENEMY_SIMULATION_RADIUS = 0.08
-MARTIAN_ENEMY_SIMULATOR_TTL_SECONDS = 2
+SURFACE_WORLD_SIZE = 120_000
+SURFACE_TILE_SIZE = 32
+MARTIAN_ENEMY_ACTIVE_RADIUS = 8 * 1200 / SURFACE_WORLD_SIZE
+MARTIAN_ENEMY_SIGHT_RADIUS = 14 * SURFACE_TILE_SIZE / SURFACE_WORLD_SIZE
+MARTIAN_ENEMY_ATTACK_RADIUS = 10 * SURFACE_TILE_SIZE / SURFACE_WORLD_SIZE
+MARTIAN_ENEMY_SPEED = 145 / SURFACE_WORLD_SIZE
+MARTIAN_ENEMY_SPAWN_INTERVAL_SECONDS = 1.5
+MARTIAN_PROJECTILE_SPEED = 1440 / SURFACE_WORLD_SIZE
+MARTIAN_PROJECTILE_LIFETIME_SECONDS = 4800 / 1440
+MAX_SHARED_MARTIAN_PROJECTILES = 500
 STATE_LOCK = threading.RLock()
 PLAYERS: dict[str, dict] = {}
 WORLDS: dict[str, dict] = {}
@@ -414,32 +423,357 @@ def sanitize_martian_enemy(enemy: object) -> dict | None:
         "facing": enemy.get("facing") if enemy.get("facing") in ("up", "down", "left", "right") else "down",
         "animationFrame": enemy.get("animationFrame") if isinstance(enemy.get("animationFrame"), int) else 1,
         "isMoving": enemy.get("isMoving") is True,
-        "shooting": enemy.get("shooting") is True,
+        "shotSequence": enemy.get("shotSequence", 0)
+        if isinstance(enemy.get("shotSequence", 0), int) and not isinstance(enemy.get("shotSequence", 0), bool)
+        else 0,
+        "shotAt": enemy.get("shotAt", 0)
+        if isinstance(enemy.get("shotAt", 0), (int, float))
+        and not isinstance(enemy.get("shotAt", 0), bool)
+        and math.isfinite(enemy.get("shotAt", 0))
+        else 0,
     }
 
 
-def is_enemy_simulator_active(enemy: dict, planet: str, simulator_id: str) -> bool:
-    simulator = PLAYERS.get(simulator_id)
-    snapshot = simulator.get("snapshot", {}) if simulator else {}
+def surface_delta(target: float, origin: float) -> float:
+    delta = (target % 1) - (origin % 1)
+    if delta > 0.5:
+        delta -= 1
+    elif delta < -0.5:
+        delta += 1
+    return delta
+
+
+def surface_distance(first_x: float, first_y: float, second_x: float, second_y: float) -> float:
+    return math.hypot(surface_delta(first_x, second_x), surface_delta(first_y, second_y))
+
+
+def surface_segment_distance(
+    point_x: float,
+    point_y: float,
+    start_x: float,
+    start_y: float,
+    movement_x: float,
+    movement_y: float,
+) -> float:
+    offset_x = surface_delta(point_x, start_x)
+    offset_y = surface_delta(point_y, start_y)
+    movement_length_squared = movement_x * movement_x + movement_y * movement_y
+    progress = 0 if movement_length_squared == 0 else min(
+        1,
+        max(0, (offset_x * movement_x + offset_y * movement_y) / movement_length_squared),
+    )
+    return math.hypot(
+        offset_x - movement_x * progress,
+        offset_y - movement_y * progress,
+    )
+
+
+def surface_players(planet: str) -> list[tuple[str, dict]]:
+    return [
+        (player_id, entry["snapshot"])
+        for player_id, entry in PLAYERS.items()
+        if entry["snapshot"].get("scene") == "surface"
+        and str(entry["snapshot"].get("planet", "")).strip().lower() == planet
+    ]
+
+
+def update_shared_martian_world(world: dict, planet: str, now: float) -> None:
+    players = surface_players(planet)
+    active_player_entries = [
+        (player_id, snapshot) for player_id, snapshot in players
+        if isinstance(snapshot.get("surfaceX"), (int, float))
+        and not isinstance(snapshot.get("surfaceX"), bool)
+        and isinstance(snapshot.get("surfaceY"), (int, float))
+        and not isinstance(snapshot.get("surfaceY"), bool)
+        and math.isfinite(snapshot["surfaceX"])
+        and math.isfinite(snapshot["surfaceY"])
+    ]
+    enemies = world.setdefault("_martianEnemies", {})
+    projectiles = world.setdefault("_martianProjectiles", {})
+    projectile_hits = world.setdefault("_martianProjectileHits", [])
+    if not isinstance(enemies, dict):
+        enemies = world["_martianEnemies"] = {}
+    if not isinstance(projectiles, dict):
+        projectiles = world["_martianProjectiles"] = {}
+    if not isinstance(projectile_hits, list):
+        projectile_hits = world["_martianProjectileHits"] = []
+    active_players = [snapshot for _, snapshot in active_player_entries]
+    blocked_projectile_ids: set[str] = set()
+    player_enemy_counts = [
+        (
+            snapshot,
+            8 if isinstance(snapshot.get("pose"), dict) and snapshot["pose"].get("hoverboard") else (
+                6 if planet in ("luna", "moon") else 4
+            ),
+            sum(
+                surface_distance(
+                    enemy["x"], enemy["y"], snapshot["surfaceX"], snapshot["surfaceY"]
+                ) <= MARTIAN_ENEMY_ACTIVE_RADIUS
+                for enemy in enemies.values()
+                if isinstance(enemy, dict)
+            ),
+        )
+        for snapshot in active_players
+    ]
+    terrain_reports: dict[str, dict[str, bool]] = {}
+    visibility_reports: dict[str, dict[str, bool]] = {}
+    for player_id, player_snapshot in players:
+        surface_state = player_snapshot.get("surfaceWorld", {})
+        reports = surface_state.get("martianEnemyObstacles", []) if isinstance(surface_state, dict) else []
+        if not isinstance(reports, list):
+            continue
+        for report in reports[:MAX_SHARED_MARTIAN_ENEMIES]:
+            if not isinstance(report, dict) or not isinstance(report.get("id"), str):
+                continue
+            blocked = report.get("blocked")
+            if not isinstance(blocked, dict) or any(
+                not isinstance(blocked.get(direction), bool)
+                for direction in ("up", "right", "down", "left")
+            ):
+                continue
+            known = terrain_reports.setdefault(report["id"], {})
+            for direction in ("up", "right", "down", "left"):
+                known[direction] = known.get(direction, False) or blocked[direction]
+            if isinstance(report.get("canSeePlayer"), bool):
+                visibility_reports.setdefault(report["id"], {})[player_id] = report["canSeePlayer"]
+        projectile_reports = surface_state.get("martianProjectileObstacles", [])
+        if isinstance(projectile_reports, list):
+            blocked_projectile_ids.update(
+                report["id"]
+                for report in projectile_reports[:MAX_SHARED_MARTIAN_PROJECTILES]
+                if isinstance(report, dict)
+                and isinstance(report.get("id"), str)
+                and len(report["id"]) <= 200
+                and report.get("blocked") is True
+            )
+    for enemy_id, blocked in terrain_reports.items():
+        enemy = enemies.get(enemy_id)
+        if isinstance(enemy, dict):
+            enemy["_blockedDirections"] = blocked
+            enemy["_blockedDirectionsAt"] = now
+            enemy["_visiblePlayers"] = visibility_reports.get(enemy_id, {})
+
+    center, desired_count, nearby_enemy_count = min(
+        player_enemy_counts,
+        key=lambda item: item[2],
+        default=(None, 0, 0),
+    )
     if (
-        not simulator
-        or time.time() - simulator.get("seen_at", 0) > MARTIAN_ENEMY_SIMULATOR_TTL_SECONDS
-        or snapshot.get("scene") != "surface"
-        or str(snapshot.get("planet", "")).strip().lower() != planet
+        center is not None
+        and nearby_enemy_count < desired_count
+        and now >= world.get("_nextEnemySpawnAt", 0)
     ):
-        return False
-    center_x = snapshot.get("surfaceX")
-    center_y = snapshot.get("surfaceY")
-    if any(
-        not isinstance(value, (int, float))
-        or isinstance(value, bool)
-        or not math.isfinite(value)
-        for value in (center_x, center_y)
-    ):
-        return False
-    delta_x = abs((enemy["x"] % 1) - (center_x % 1))
-    delta_y = abs((enemy["y"] % 1) - (center_y % 1))
-    return math.hypot(min(delta_x, 1 - delta_x), min(delta_y, 1 - delta_y)) <= MARTIAN_ENEMY_SIMULATION_RADIUS
+        angle = random.random() * math.tau
+        radius = random.uniform(0.015, 0.04)
+        cell_size = SURFACE_TILE_SIZE / SURFACE_WORLD_SIZE
+        spawn_x = (center["surfaceX"] + math.cos(angle) * radius) % 1
+        spawn_y = (center["surfaceY"] + math.sin(angle) * radius) % 1
+        spawn_x = (round(spawn_x / cell_size - 0.5) + 0.5) * cell_size % 1
+        spawn_y = (round(spawn_y / cell_size - 0.5) + 0.5) * cell_size % 1
+        sequence = world.get("_enemySpawnSequence", 0) + 1
+        world["_enemySpawnSequence"] = sequence
+        enemy_id = f"{planet}:enemy:{sequence}"
+        enemies[enemy_id] = {
+            "id": enemy_id,
+            "type": "lunatic" if planet in ("luna", "moon") else "martian",
+            "x": spawn_x,
+            "y": spawn_y,
+            "hp": 3,
+            "maxHp": 3,
+            "ammo": 6,
+            "maxAmmo": 6,
+            "facing": "down",
+            "animationFrame": 1,
+            "isMoving": False,
+            "_fireCooldown": random.uniform(0.6, 1.4),
+            "_wait": 0.2,
+            "_lastSimulatedAt": now,
+            "_shotSequence": 0,
+            "_shotAt": 0,
+            "shotSequence": 0,
+            "shotAt": 0,
+            "_blockedDirections": {},
+        }
+        world["_nextEnemySpawnAt"] = now + MARTIAN_ENEMY_SPAWN_INTERVAL_SECONDS
+
+    for enemy_id, enemy in list(enemies.items()):
+        if not isinstance(enemy, dict) or enemy.get("hp", 0) <= 0:
+            enemies.pop(enemy_id, None)
+            continue
+        candidates = [
+            snapshot for snapshot in active_players
+            if surface_distance(
+                enemy["x"], enemy["y"], snapshot["surfaceX"], snapshot["surfaceY"]
+            ) <= MARTIAN_ENEMY_ACTIVE_RADIUS
+        ]
+        if not candidates:
+            if now - enemy.get("_lastNearbyAt", enemy.get("_lastSimulatedAt", now)) > PLAYER_TTL_SECONDS:
+                enemies.pop(enemy_id, None)
+            continue
+        visible_candidates = [
+            snapshot for snapshot in candidates
+            if enemy.get("_visiblePlayers", {}).get(snapshot.get("id")) is True
+        ]
+        target = min(
+            visible_candidates or candidates,
+            key=lambda snapshot: surface_distance(
+                enemy["x"], enemy["y"], snapshot["surfaceX"], snapshot["surfaceY"]
+            ),
+        )
+        enemy["_lastNearbyAt"] = now
+        previous_time = enemy.get("_lastSimulatedAt", now)
+        elapsed = min(max(now - previous_time, 0), 0.25)
+        enemy["_lastSimulatedAt"] = now
+        if elapsed <= 0:
+            continue
+        if now - enemy.get("_blockedDirectionsAt", 0) > 0.5:
+            enemy["_blockedDirections"] = {}
+
+        dx = surface_delta(target["surfaceX"], enemy["x"])
+        dy = surface_delta(target["surfaceY"], enemy["y"])
+        distance = math.hypot(dx, dy)
+        aligned = min(abs(dx), abs(dy)) <= SURFACE_TILE_SIZE * 0.6 / SURFACE_WORLD_SIZE
+        can_attack = (
+            distance <= MARTIAN_ENEMY_ATTACK_RADIUS
+            and aligned
+            and enemy.get("_visiblePlayers", {}).get(target.get("id")) is True
+        )
+        enemy["_fireCooldown"] = max(0, enemy.get("_fireCooldown", 0.8) - elapsed)
+        if enemy.get("ammo", 0) <= 0:
+            if enemy.get("_reloadUntil", 0) <= 0:
+                enemy["_reloadUntil"] = now + 4
+            elif now >= enemy["_reloadUntil"]:
+                enemy["ammo"] = enemy.get("maxAmmo", 6)
+                enemy["_reloadUntil"] = 0
+        enemy["reloading"] = enemy.get("_reloadUntil", 0) > now
+        enemy["isMoving"] = False
+
+        if can_attack and enemy["ammo"] > 0:
+            facing = (
+                "left" if dx < 0 else "right"
+            ) if abs(dx) >= abs(dy) else (
+                "up" if dy < 0 else "down"
+            )
+            enemy["facing"] = facing
+            if enemy["_fireCooldown"] <= 0:
+                direction = {
+                    "up": (0, -1), "right": (1, 0),
+                    "down": (0, 1), "left": (-1, 0),
+                }[facing]
+                projectile_sequence = enemy.get("_shotSequence", 0) + 1
+                projectile_id = f"{enemy_id}:shot:{projectile_sequence}"
+                offset = 59 / SURFACE_WORLD_SIZE
+                projectiles[projectile_id] = {
+                    "id": projectile_id,
+                    "enemyId": enemy_id,
+                    "x": (enemy["x"] + direction[0] * offset) % 1,
+                    "y": (enemy["y"] + direction[1] * offset) % 1,
+                    "vx": direction[0] * MARTIAN_PROJECTILE_SPEED,
+                    "vy": direction[1] * MARTIAN_PROJECTILE_SPEED,
+                    "damage": 1,
+                    "life": MARTIAN_PROJECTILE_LIFETIME_SECONDS,
+                    "_updatedAt": now,
+                }
+                enemy["ammo"] -= 1
+                enemy["_shotSequence"] = projectile_sequence
+                enemy["_shotAt"] = now
+                enemy["shotSequence"] = projectile_sequence
+                enemy["shotAt"] = now
+                enemy["_fireCooldown"] = 1.05
+                if enemy["ammo"] <= 0:
+                    enemy["_reloadUntil"] = now + 4
+        elif distance > MARTIAN_ENEMY_SIGHT_RADIUS or not can_attack:
+            preferred_axis_x = abs(dx) >= abs(dy)
+            directions = (
+                [
+                    ("right" if dx > 0 else "left", dx, True),
+                    ("down" if dy > 0 else "up", dy, False),
+                ]
+                if preferred_axis_x
+                else [
+                    ("down" if dy > 0 else "up", dy, False),
+                    ("right" if dx > 0 else "left", dx, True),
+                ]
+            )
+            blocked = enemy.get("_blockedDirections", {})
+            movement_axis = next(
+                (
+                    (facing, delta, axis_x)
+                    for facing, delta, axis_x in directions
+                    if abs(delta) > SURFACE_TILE_SIZE / SURFACE_WORLD_SIZE
+                    and blocked.get(facing) is False
+                ),
+                None,
+            )
+            if movement_axis:
+                facing, delta, axis_x = movement_axis
+                enemy["facing"] = facing
+                speed = MARTIAN_ENEMY_SPEED * (2 if enemy["type"] == "lunatic" else 1)
+                movement = min(speed * elapsed, abs(delta))
+                if axis_x:
+                    enemy["x"] = (enemy["x"] + math.copysign(movement, delta)) % 1
+                else:
+                    enemy["y"] = (enemy["y"] + math.copysign(movement, delta)) % 1
+                enemy["isMoving"] = movement > 0
+        enemy["_updatedAt"] = now
+
+    for projectile_id, projectile in list(projectiles.items()):
+        if projectile_id in blocked_projectile_ids:
+            projectiles.pop(projectile_id, None)
+            continue
+        elapsed = min(max(now - projectile.get("_updatedAt", now), 0), 0.25)
+        start_x = projectile["x"]
+        start_y = projectile["y"]
+        movement_x = projectile["vx"] * elapsed
+        movement_y = projectile["vy"] * elapsed
+        projectile["x"] = (start_x + movement_x) % 1
+        projectile["y"] = (start_y + movement_y) % 1
+        projectile["life"] -= elapsed
+        projectile["_updatedAt"] = now
+        hit_player = next(
+            (
+                (player_id, snapshot) for player_id, snapshot in active_player_entries
+                if surface_segment_distance(
+                    snapshot["surfaceX"],
+                    snapshot["surfaceY"],
+                    start_x,
+                    start_y,
+                    movement_x,
+                    movement_y,
+                ) <= 16 / SURFACE_WORLD_SIZE
+            ),
+            None,
+        )
+        if hit_player:
+            player_id, _ = hit_player
+            projectile_hits.append({
+                "id": projectile_id,
+                "playerId": player_id,
+                "damage": projectile.get("damage", 1),
+                "createdAt": now,
+            })
+            projectiles.pop(projectile_id, None)
+        elif projectile["life"] <= 0:
+            projectiles.pop(projectile_id, None)
+
+    world["_martianProjectileHits"] = [
+        event for event in projectile_hits
+        if isinstance(event, dict) and now - event.get("createdAt", now) <= 10
+    ][-500:]
+    world["_martianEnemies"] = dict(
+        sorted(
+            enemies.items(),
+            key=lambda item: item[1].get("_updatedAt", item[1].get("_lastSimulatedAt", 0)),
+            reverse=True,
+        )[:MAX_SHARED_MARTIAN_ENEMIES]
+    )
+    world["_martianProjectiles"] = dict(
+        sorted(
+            projectiles.items(),
+            key=lambda item: item[1].get("life", 0),
+            reverse=True,
+        )[:MAX_SHARED_MARTIAN_PROJECTILES]
+    )
 
 
 def public_world(world: dict, snapshot: dict | None = None, player_id: str = "") -> dict:
@@ -473,18 +807,20 @@ def public_world(world: dict, snapshot: dict | None = None, player_id: str = "")
     enemies = world.get("_martianEnemies", {})
     planet = str(world.get("planet", "")).strip().lower()
     public["martianEnemies"] = [
-        {
-            **{key: value for key, value in enemy.items() if not key.startswith("_")},
-            "simulateHere": (
-                enemy.get("_simulatorId") == player_id
-                or not is_enemy_simulator_active(
-                    enemy, planet, str(enemy.get("_simulatorId", ""))
-                )
-            ),
-        }
+        {key: value for key, value in enemy.items() if not key.startswith("_")}
         for enemy in enemies.values()
         if isinstance(enemies, dict) and isinstance(enemy, dict) and enemy.get("hp", 0) > 0 and is_nearby(enemy)
     ][:MAX_SHARED_MARTIAN_ENEMIES] if isinstance(enemies, dict) else []
+    projectiles = world.get("_martianProjectiles", {})
+    public["martianProjectiles"] = [
+        {key: value for key, value in projectile.items() if not key.startswith("_")}
+        for projectile in projectiles.values()
+        if isinstance(projectiles, dict) and isinstance(projectile, dict) and is_nearby(projectile)
+    ][:MAX_SHARED_MARTIAN_PROJECTILES] if isinstance(projectiles, dict) else []
+    public["martianProjectileHits"] = [
+        event for event in world.get("_martianProjectileHits", [])
+        if isinstance(event, dict) and event.get("playerId") == player_id
+    ]
     return public
 
 
@@ -1140,9 +1476,19 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
 
                 previous_world = WORLDS.get(planet)
                 shared_world = dict(existing_world or {})
+                for state_key in (
+                    "_martianEnemies", "_martianProjectiles", "_martianProjectileHits",
+                ):
+                    state_value = shared_world.get(state_key)
+                    if isinstance(state_value, (dict, list)):
+                        shared_world[state_key] = copy.deepcopy(state_value)
                 shared_world.update({
                     key: value for key, value in surface_world.items()
-                    if key not in ("pickups", "collectedPickupIds", "martianEnemies")
+                    if key not in (
+                        "pickups", "collectedPickupIds", "martianEnemies",
+                        "martianProjectiles", "martianEnemyObstacles",
+                        "martianProjectileObstacles",
+                    )
                     and not key.startswith("_")
                 })
                 shared_world["planet"] = str(surface_world.get("planet", planet))
@@ -1185,8 +1531,14 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                         if clean_enemy:
                             enemy_states[clean_enemy["id"]] = {
                                 **clean_enemy,
-                                "_simulatorId": "",
                                 "_updatedAt": now,
+                                "_lastSimulatedAt": now,
+                                "_lastNearbyAt": now,
+                                "_fireCooldown": 0.8,
+                                "_reloadUntil": 0,
+                                "_shotSequence": clean_enemy["shotSequence"],
+                                "_shotAt": clean_enemy["shotAt"],
+                                "_blockedDirections": {},
                             }
                 incoming_deaths = surface_world.get("deadMartianEnemyIds", [])
                 if isinstance(incoming_deaths, list):
@@ -1210,46 +1562,18 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                             continue
                         previous_enemy = enemy_states.get(enemy_id)
                         if not isinstance(previous_enemy, dict):
-                            if enemy["hp"] > 0:
-                                enemy_states[enemy_id] = {
-                                    **enemy,
-                                    "_simulatorId": player_id,
-                                    "_updatedAt": now,
-                                }
                             continue
-
                         previous_enemy["hp"] = min(previous_enemy.get("hp", enemy["hp"]), enemy["hp"])
-                        simulator_id = str(previous_enemy.get("_simulatorId", ""))
-                        if simulator_id == player_id or not is_enemy_simulator_active(
-                            previous_enemy, planet, simulator_id
-                        ):
-                            enemy_states[enemy_id] = {
-                                **enemy,
-                                "hp": previous_enemy["hp"],
-                                "_simulatorId": player_id,
-                                "_updatedAt": now,
-                            }
-                        if enemy_states.get(enemy_id, {}).get("hp", 0) <= 0:
+                        if previous_enemy["hp"] <= 0:
                             enemy_states.pop(enemy_id, None)
                             if enemy_id not in dead_enemy_set:
                                 dead_enemy_ids.append(enemy_id)
                                 dead_enemy_set.add(enemy_id)
 
-                for enemy_id, enemy in list(enemy_states.items()):
-                    if now - enemy.get("_updatedAt", now) > PLAYER_TTL_SECONDS:
-                        enemy_states.pop(enemy_id, None)
-                shared_world["_martianEnemies"] = dict(
-                    sorted(
-                        enemy_states.items(),
-                        key=lambda item: item[1].get("_updatedAt", 0),
-                        reverse=True,
-                    )[:MAX_SHARED_MARTIAN_ENEMIES]
-                )
+                shared_world["_martianEnemies"] = enemy_states
+                if planet in ("mars", "luna", "moon"):
+                    update_shared_martian_world(shared_world, planet, now)
                 shared_world["_deadMartianEnemyIds"] = list(dict.fromkeys(dead_enemy_ids))[-5000:]
-                shared_world["martianEnemies"] = [
-                    {key: value for key, value in enemy.items() if not key.startswith("_")}
-                    for enemy in shared_world["_martianEnemies"].values()
-                ]
 
                 if shared_world != previous_world:
                     WORLDS[planet] = shared_world
