@@ -193,6 +193,9 @@ const HOSTILE_PURSUIT_RANGE_CHUNKS = 5;
 const HOSTILE_ATTACK_RANGE_CHUNKS = 3;
 const CHUNK_RADIUS = 2;
 const SHIP_HEALTH_SCALE = 0.5;
+let surfaceRegolithGunDamage = 1;
+let surfaceCobaltKnifeDamage = 1;
+let enemyDetectorSellPrice = 125;
 const CAMERA_ZOOM = 2.2;
 const MIN_PLAYER_ZOOM = 1;
 const SURFACE_PLAYER_ZOOM = MIN_PLAYER_ZOOM * 2;
@@ -749,10 +752,10 @@ function sendChatMessage(text) {
     closeChatComposer();
     return;
   }
-  if (message.toLowerCase() === '/ilovebeingadmin') {
+  if (message.toLowerCase() === '/iadmin') {
     adminCommandsEnabled = true;
     const adminCommandList = '/repair, /craft, /home, /mision, /mars, /fuel, /regolito, /money, /enemy';
-    setMessage(`Comandos activados: ${adminCommandList}${serverAdmin ? ', /tabla' : ''}.`);
+    setMessage(`Comandos activados: ${adminCommandList}${serverAdmin ? ', /tabla, /Balance' : ''}.`);
     chatInput.value = '';
     closeChatComposer();
     return;
@@ -768,6 +771,17 @@ function sendChatMessage(text) {
     } else {
       showPlayerChatMessage('/tabla');
       window.open('/admin.html', '_blank', 'noopener,noreferrer');
+    }
+    chatInput.value = '';
+    closeChatComposer();
+    return;
+  }
+  if (/^\/balance(?:\s|$)/i.test(message)) {
+    if (!serverAdmin) {
+      setMessage('Solo un administrador del servidor puede abrir /Balance.');
+    } else {
+      showPlayerChatMessage('/Balance');
+      window.open('/Balance', '_blank', 'noopener,noreferrer');
     }
     chatInput.value = '';
     closeChatComposer();
@@ -1465,6 +1479,7 @@ async function syncMultiplayer(force = false) {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const responseState = await response.json();
+    applyBalanceSettings(responseState.balance);
     const peers = Array.isArray(responseState) ? responseState : responseState.players;
     const activeWorldKey = game.scene === 'surface' && game.surface
       ? game.surface.planet.name.toLowerCase()
@@ -5906,14 +5921,14 @@ function useCobaltoKnife(facing = game.surface?.facing) {
     )
     .sort((first, second) => first.forwardDistance - second.forwardDistance)[0]?.enemy;
   if (target) {
-    damageMartianEnemy(target, 1);
+    damageMartianEnemy(target, surfaceCobaltKnifeDamage);
   } else if (isHomeworld(game.surface.planet) && game.earthWanderer) {
     const dx = getSurfaceAxisDelta(game.earthWanderer.x, game.surface.x);
     const dy = getSurfaceAxisDelta(game.earthWanderer.y, game.surface.y);
     const forwardDistance = dx * direction.x + dy * direction.y;
     const sideDistance = Math.abs(dx * direction.y - dy * direction.x);
     if (forwardDistance > 0 && forwardDistance <= COBALTO_KNIFE_RANGE && sideDistance <= SURFACE_TILE * 0.7) {
-      damageEarthWanderer(game.earthWanderer, 1);
+      damageEarthWanderer(game.earthWanderer, surfaceCobaltKnifeDamage);
     }
   }
   return true;
@@ -5939,7 +5954,7 @@ function fireSurfaceGun(facing = game.surface?.facing) {
     owner: 'player',
     multiplayerId: `${multiplayerPlayerId}:${++multiplayerProjectileSequence}`,
     hitPlayers: new Set(),
-    damage: 1,
+    damage: surfaceRegolithGunDamage,
     x: wrapSurfaceCoordinate(game.surface.x + gunPlacement.x + direction.x * 27),
     y: wrapSurfaceCoordinate(game.surface.y + gunPlacement.y + direction.y * 27),
     vx: direction.x * 1440,
@@ -7013,24 +7028,82 @@ const merchantInitialStock = merchantStock.map((item) => item.count);
 let nextMerchantRestockAt = Date.now() + MERCHANT_RESTOCK_INTERVAL;
 
 // El comerciante paga las materias primas a la mitad de su valor.
-const MERCHANT_RESOURCE_BUY_FACTOR = 0.5;
+let merchantResourceBuyFactor = 0.5;
+let appliedBalanceSettings = null;
+
+function applyBalanceSettings(settings) {
+  if (!settings || typeof settings !== 'object') return;
+  const normalized = {};
+  let changed = false;
+  for (const [fieldId, rawValue] of Object.entries(settings)) {
+    const value = Number(rawValue);
+    if (!Number.isFinite(value)) continue;
+    normalized[fieldId] = value;
+    const segments = fieldId.split('.');
+    if (segments[0] === 'resource' && segments[2] === 'price' && RESOURCE_SELL_PRICES[segments[1]] !== undefined) {
+      if (RESOURCE_SELL_PRICES[segments[1]] !== value) changed = true;
+      RESOURCE_SELL_PRICES[segments[1]] = value;
+    } else if (segments[0] === 'part') {
+      const part = getShipPart(segments[1]);
+      if (!part) continue;
+      if (segments[2] === 'price') {
+        if (part.price !== value) changed = true;
+        part.price = value;
+      } else if (['health', 'weaponDamage', 'weaponCooldown'].includes(segments[2])) {
+        part.stats ||= {};
+        if (part.stats[segments[2]] !== value) changed = true;
+        part.stats[segments[2]] = value;
+      }
+    } else if (segments[0] === 'merchant' && segments[2] === 'price') {
+      const item = merchantStock.find((entry) => entry.id === segments[1]);
+      if (!item) continue;
+      if (item.price !== value) changed = true;
+      item.price = value;
+    } else if (segments[0] === 'item') {
+      if (segments[2] === 'damage' && segments[1] === REGOLITO_GUN_ITEM_ID) {
+        if (surfaceRegolithGunDamage !== value) changed = true;
+        surfaceRegolithGunDamage = value;
+      } else if (segments[2] === 'damage' && segments[1] === COBALTO_KNIFE_ITEM_ID) {
+        if (surfaceCobaltKnifeDamage !== value) changed = true;
+        surfaceCobaltKnifeDamage = value;
+      } else if (segments[2] === 'sellPrice' && segments[1] === REGOLITO_GUN_ITEM_ID) {
+        if (itemSellPrices[REGOLITO_GUN_ITEM_ID] !== value) changed = true;
+        itemSellPrices[REGOLITO_GUN_ITEM_ID] = value;
+      } else if (segments[2] === 'sellPrice' && segments[1] === HOVERBOARD_ITEM_ID) {
+        if (itemSellPrices[HOVERBOARD_ITEM_ID] !== value) changed = true;
+        itemSellPrices[HOVERBOARD_ITEM_ID] = value;
+      } else if (segments[2] === 'sellPrice' && segments[1] === 'enemy-detector') {
+        if (enemyDetectorSellPrice !== value) changed = true;
+        enemyDetectorSellPrice = value;
+      }
+    } else if (fieldId === 'economy.resourceBuyFactor') {
+      if (merchantResourceBuyFactor !== value) changed = true;
+      merchantResourceBuyFactor = value;
+    }
+  }
+  if (appliedBalanceSettings && Object.keys(normalized).length !== Object.keys(appliedBalanceSettings).length) {
+    changed = true;
+  }
+  appliedBalanceSettings = normalized;
+  if (changed && typeof marketPanel !== 'undefined' && !marketPanel.hidden) updateMarketPanel();
+}
 
 const itemSellPrices = { [REGOLITO_GUN_ITEM_ID]: 100, [HOVERBOARD_ITEM_ID]: 2000 };
 
 function getItemSellPrice(item) {
-  if (RESOURCE_SELL_PRICES[item.resourceKey]) {
+  if (Object.prototype.hasOwnProperty.call(RESOURCE_SELL_PRICES, item.resourceKey)) {
     if (Array.isArray(item.priceLots) && item.priceLots.length > 0) {
       const count = item.priceLots.reduce((total, lot) => total + lot.count, 0);
       if (count > 0) {
         return item.priceLots.reduce((total, lot) => total + lot.unitPrice * lot.count, 0) / count
-          * MERCHANT_RESOURCE_BUY_FACTOR;
+          * merchantResourceBuyFactor;
       }
     }
     return (Number.isFinite(item.unitPrice)
       ? item.unitPrice
-      : RESOURCE_SELL_PRICES[item.resourceKey]) * MERCHANT_RESOURCE_BUY_FACTOR;
+      : RESOURCE_SELL_PRICES[item.resourceKey]) * merchantResourceBuyFactor;
   }
-  if (item.id === 'enemy-detector') return 125;
+  if (item.id === 'enemy-detector') return enemyDetectorSellPrice;
   const shipPart = getShipPart(item.id);
   if (shipPart) return Math.max(1, Math.round(shipPart.price * 0.5));
   return itemSellPrices[item.id] ?? null;
@@ -7224,7 +7297,7 @@ function sellMarketItem(index) {
       return;
     }
     earned = Math.round(
-      selection.taken.reduce((total, lot) => total + lot.unitPrice * lot.count, 0) * MERCHANT_RESOURCE_BUY_FACTOR
+      selection.taken.reduce((total, lot) => total + lot.unitPrice * lot.count, 0) * merchantResourceBuyFactor
     );
     item.priceLots = selection.remaining;
   }

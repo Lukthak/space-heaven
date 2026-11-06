@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Balance del juego - SpaceHeaven</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: Consolas, monospace;
+        background: #05070b;
+        color: #e8edf5;
+      }
+      * { box-sizing: border-box; }
+      body { max-width: 1180px; margin: 0 auto; padding: 24px; }
+      header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
+      h1 { margin: 0; color: #fff; font-size: 24px; }
+      h2 { margin: 0 0 16px; color: #9dcfff; font-size: 16px; }
+      p { color: #aab4c3; line-height: 1.6; }
+      button, a { color: #fff; font: inherit; }
+      button { padding: 10px 14px; border: 1px solid #53677e; background: #111a26; cursor: pointer; }
+      button:hover, a:hover { color: #85d7ff; }
+      button:disabled { cursor: wait; opacity: 0.6; }
+      a { text-decoration: none; }
+      .actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+      #status { min-height: 24px; color: #9dcfff; }
+      #status.error { color: #ff9a9a; }
+      #status.success { color: #8cffae; }
+      #balanceForm { display: grid; gap: 16px; }
+      section { border: 1px solid #263648; background: #0b111a; padding: 18px; }
+      .fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 12px; }
+      .field { display: grid; gap: 8px; border: 1px solid #202c3a; background: #080d14; padding: 12px; }
+      .field label { color: #e8edf5; font-size: 13px; }
+      .field input { width: 100%; padding: 9px; border: 1px solid #40536a; background: #05070b; color: #fff; font: inherit; }
+      .field small { color: #8997a8; font-size: 11px; }
+      .note { border-left: 3px solid #39b9ff; padding: 2px 12px; }
+      @media (max-width: 600px) {
+        body { padding: 14px; }
+        h1 { font-size: 20px; }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div>
+        <h1>Balance del juego</h1>
+        <p>Precios, resistencia y armas. Los cambios se guardan en el servidor y se sincronizan con los jugadores en línea.</p>
+      </div>
+      <nav class="actions">
+        <a href="/admin.html">Administración</a>
+        <a href="/">Volver al juego</a>
+      </nav>
+    </header>
+    <p class="note">Los valores se aplican a las acciones nuevas. La vida máxima de piezas cambia al instante; la vida actual no se rellena automáticamente.</p>
+    <p id="status" role="status" aria-live="polite">Cargando configuración…</p>
+    <form id="balanceForm" hidden>
+      <div id="sections"></div>
+      <div class="actions">
+        <button id="save" type="submit">Guardar cambios</button>
+        <button id="reset" type="button">Restaurar valores iniciales</button>
+      </div>
+    </form>
+    <script>
+      const token = localStorage.getItem('spaceHeaven.authToken') || '';
+      const form = document.querySelector('#balanceForm');
+      const sections = document.querySelector('#sections');
+      const status = document.querySelector('#status');
+      const saveButton = document.querySelector('#save');
+      const resetButton = document.querySelector('#reset');
+      let fields = [];
+
+      function showStatus(message, kind = '') {
+        status.className = kind;
+        status.textContent = message;
+      }
+
+      async function request(url, options = {}) {
+        const response = await fetch(url, {
+          ...options,
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+            ...options.headers,
+          },
+          cache: 'no-store',
+        });
+        const data = await response.json();
+        if (response.status === 401) throw new Error('La sesión venció. Inicia sesión otra vez en el juego.');
+        if (response.status === 403) throw new Error('Esta cuenta no tiene permisos de administrador.');
+        if (!response.ok) throw new Error(data.error || `Error del servidor: HTTP ${response.status}`);
+        return data;
+      }
+
+      function renderFields() {
+        sections.replaceChildren();
+        const categories = new Map();
+        for (const field of fields) {
+          if (!categories.has(field.category)) categories.set(field.category, []);
+          categories.get(field.category).push(field);
+        }
+        for (const [category, categoryFields] of categories) {
+          const section = document.createElement('section');
+          const heading = document.createElement('h2');
+          heading.textContent = category;
+          const grid = document.createElement('div');
+          grid.className = 'fields';
+          for (const field of categoryFields) {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'field';
+            const label = document.createElement('label');
+            label.htmlFor = `field-${field.id}`;
+            label.textContent = field.label;
+            const input = document.createElement('input');
+            input.id = `field-${field.id}`;
+            input.dataset.balanceId = field.id;
+            input.type = 'number';
+            input.min = field.min;
+            input.max = field.max;
+            input.step = field.step;
+            input.value = field.value;
+            input.required = true;
+            const hint = document.createElement('small');
+            hint.textContent = `Límites: ${field.min}–${field.max} ${field.unit} · Inicial: ${field.default}`;
+            wrapper.append(label, input, hint);
+            grid.append(wrapper);
+          }
+          section.append(heading, grid);
+          sections.append(section);
+        }
+      }
+
+      async function load() {
+        if (!token) throw new Error('Inicia sesión con una cuenta autorizada para administrar el balance.');
+        const data = await request('/api/admin/balance');
+        fields = data.fields;
+        renderFields();
+        form.hidden = false;
+        showStatus('Configuración cargada.', 'success');
+      }
+
+      async function save(values, successMessage) {
+        saveButton.disabled = true;
+        resetButton.disabled = true;
+        showStatus('Guardando configuración…');
+        try {
+          await request('/api/admin/balance', {
+            method: 'POST',
+            body: JSON.stringify({ values }),
+          });
+          await load();
+          showStatus(successMessage, 'success');
+        } finally {
+          saveButton.disabled = false;
+          resetButton.disabled = false;
+        }
+      }
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        if (!form.reportValidity()) return;
+        const values = {};
+        for (const input of form.querySelectorAll('[data-balance-id]')) {
+          values[input.dataset.balanceId] = Number(input.value);
+        }
+        try {
+          await save(values, 'Cambios guardados. Se sincronizarán con los jugadores en línea.');
+        } catch (error) {
+          showStatus(error.message || 'No se pudo guardar la configuración.', 'error');
+        }
+      });
+
+      resetButton.addEventListener('click', async () => {
+        if (!window.confirm('¿Restaurar todos los valores predeterminados?')) return;
+        const values = Object.fromEntries(fields.map((field) => [field.id, field.default]));
+        try {
+          await save(values, 'Se restauraron los valores predeterminados.');
+        } catch (error) {
+          showStatus(error.message || 'No se pudo restaurar la configuración.', 'error');
+        }
+      });
+
+      load().catch((error) => showStatus(error.message || 'No se pudo cargar la configuración.', 'error'));
+    </script>
+  </body>
+</html>

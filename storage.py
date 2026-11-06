@@ -65,6 +65,13 @@ def initialize() -> bool:
                 )
             """)
             cursor.execute("""
+                CREATE TABLE IF NOT EXISTS game_settings (
+                    setting_key TEXT PRIMARY KEY,
+                    value JSONB NOT NULL,
+                    updated_at DOUBLE PRECISION NOT NULL
+                )
+            """)
+            cursor.execute("""
                 CREATE TABLE IF NOT EXISTS server_events (
                     id BIGSERIAL PRIMARY KEY,
                     event_type TEXT NOT NULL,
@@ -268,6 +275,32 @@ def save_worlds(worlds: dict, now: float) -> None:
                     """,
                     (planet_key, JSONB(state), now),
                 )
+
+
+def load_game_setting(setting_key: str) -> dict | None:
+    with _connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT value FROM game_settings WHERE setting_key = %s",
+                (setting_key,),
+            )
+            row = cursor.fetchone()
+            return row["value"] if row else None
+
+
+def save_game_setting(setting_key: str, value: dict, now: float) -> None:
+    with _connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO game_settings (setting_key, value, updated_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (setting_key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_at = EXCLUDED.updated_at
+                """,
+                (setting_key, JSONB(value), now),
+            )
 
 
 def healthcheck() -> None:

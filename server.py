@@ -37,14 +37,178 @@ ACCOUNTS_FILE = DATA_DIR / "accounts.json"
 SAVES_FILE = DATA_DIR / "saves.json"
 WORLDS_FILE = DATA_DIR / "worlds.json"
 ACTIVITY_FILE = DATA_DIR / "activity.json"
+BALANCE_FILE = DATA_DIR / "balance.json"
 AUTH_LOCK = threading.RLock()
 SAVE_LOCK = threading.RLock()
 ACTIVITY_LOCK = threading.RLock()
+BALANCE_LOCK = threading.RLock()
 WORLDS_DIRTY = False
 WORLDS_LAST_SAVED_AT = 0.0
 PASSWORD_ITERATIONS = 310_000
 
+BALANCE_FIELD_DEFINITIONS = []
+
+
+def define_balance_field(field_id: str, category: str, label: str, default: int | float,
+                         minimum: int | float, maximum: int | float, step: int | float,
+                         unit: str) -> None:
+    BALANCE_FIELD_DEFINITIONS.append({
+        "id": field_id,
+        "category": category,
+        "label": label,
+        "default": default,
+        "min": minimum,
+        "max": maximum,
+        "step": step,
+        "unit": unit,
+    })
+
+
+for resource_id, resource_name, price in (
+    ("metal", "Metal", 15), ("crystal", "Cristal", 28), ("fuel", "Combustible", 20),
+    ("energy", "Energía", 5), ("titanium", "Titanio", 42), ("cobalt", "Cobalto", 36),
+    ("ammonia", "Amoniaco", 24), ("lithium", "Litio", 48), ("silicate", "Silicato", 31),
+    ("xenon", "Xenón", 58), ("uranium", "Uranio", 72), ("iridium", "Iridio", 95),
+    ("deuterium", "Deuterio", 84), ("graphene", "Grafeno", 110), ("neodymium", "Neodimio", 125),
+    ("methane", "Metano", 40), ("regolith", "Regolito", 8),
+):
+    define_balance_field(f"resource.{resource_id}.price", "Precios de recursos",
+                         f"{resource_name} · valor base", price, 0, 1_000_000, 1, "créditos")
+
+for part_id, part_name, price, health in (
+    ("center-classic", "Centro clásico", 180, 120),
+    ("center-reinforced", "Centro reforzado", 520, 220),
+    ("thruster-electric", "Propulsor eléctrico", 300, 85),
+    ("thruster-fuel", "Propulsor de combustible", 450, 85),
+    ("thruster-ammonia", "Propulsor de amoniaco", 900, 110),
+    ("wing-fast", "Alas rápidas", 220, 60),
+    ("wing-solar", "Paneles solares", 380, 60),
+    ("wing-titanium", "Alas de titanio", 480, 100),
+    ("wing-graphene", "Alas de grafeno", 1500, 140),
+    ("tip-sonic", "Punta sónica", 160, 50),
+    ("tip-rudimentaria", "Punta rudimentaria", 130, 75),
+    ("tip-cobalt", "Punta de cobalto", 600, 80),
+    ("tip-plasma", "Punta de plasma", 1400, 95),
+):
+    define_balance_field(f"part.{part_id}.price", "Piezas de nave",
+                         f"{part_name} · precio", price, 0, 1_000_000, 1, "créditos")
+    define_balance_field(f"part.{part_id}.health", "Piezas de nave",
+                         f"{part_name} · vida", health, 1, 100_000, 1, "HP base")
+
+for part_id, part_name, damage, cooldown in (
+    ("tip-sonic", "Punta sónica", 16, 0.38),
+    ("tip-rudimentaria", "Punta rudimentaria", 5, 0.24),
+    ("tip-cobalt", "Punta de cobalto", 24, 0.32),
+    ("tip-plasma", "Punta de plasma", 42, 0.3),
+):
+    define_balance_field(f"part.{part_id}.weaponDamage", "Armas espaciales",
+                         f"{part_name} · daño", damage, 0, 10_000, 1, "daño")
+    define_balance_field(f"part.{part_id}.weaponCooldown", "Armas espaciales",
+                         f"{part_name} · tiempo entre disparos", cooldown, 0.05, 60, 0.01, "segundos")
+
+for item_id, item_name, price in (
+    ("merchant-fuel", "Combustible", 30),
+    ("merchant-energy", "Energía", 10),
+    ("radar", "Radar", 750),
+    ("regolito-gun", "Pistola de regolito", 400),
+):
+    define_balance_field(f"merchant.{item_id}.price", "Tienda",
+                         f"{item_name} · precio de compra", price, 0, 1_000_000, 1, "créditos")
+
+define_balance_field("economy.resourceBuyFactor", "Economía", "Factor de compra de recursos",
+                     0.5, 0, 10, 0.01, "multiplicador")
+define_balance_field("item.regolito-gun.damage", "Armas de superficie",
+                     "Pistola de regolito · daño", 1, 0, 10_000, 1, "daño")
+define_balance_field("item.cobalto-knife.damage", "Armas de superficie",
+                     "Cuchillo de cobalto · daño", 1, 0, 10_000, 1, "daño")
+define_balance_field("item.regolito-gun.sellPrice", "Venta de objetos",
+                     "Pistola de regolito · precio de venta", 100, 0, 1_000_000, 1, "créditos")
+define_balance_field("item.hoverboard-board.sellPrice", "Venta de objetos",
+                     "Hoverboard · precio de venta", 2000, 0, 1_000_000, 1, "créditos")
+define_balance_field("item.enemy-detector.sellPrice", "Venta de objetos",
+                     "Detector de enemigos · precio de venta", 125, 0, 1_000_000, 1, "créditos")
+BALANCE_DEFAULTS = {field["id"]: field["default"] for field in BALANCE_FIELD_DEFINITIONS}
+
 DATABASE_ENABLED = storage.initialize()
+
+
+def validate_balance_values(values: object, require_all: bool) -> dict:
+    if not isinstance(values, dict):
+        raise ValueError("La configuración de balance debe ser un objeto.")
+    definitions = {field["id"]: field for field in BALANCE_FIELD_DEFINITIONS}
+    unknown_fields = set(values) - definitions.keys()
+    if unknown_fields:
+        raise ValueError("La configuración contiene campos no permitidos.")
+    if require_all and set(values) != definitions.keys():
+        raise ValueError("La configuración debe incluir todos los campos.")
+    validated = dict(BALANCE_DEFAULTS)
+    for field_id, value in values.items():
+        field = definitions[field_id]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < field["min"]
+            or value > field["max"]
+        ):
+            raise ValueError(f"El valor de «{field['label']}» está fuera de los límites permitidos.")
+        steps = (value - field["min"]) / field["step"]
+        if abs(steps - round(steps)) > 1e-7:
+            raise ValueError(f"El valor de «{field['label']}» no coincide con el incremento permitido.")
+        validated[field_id] = value
+    return validated
+
+
+def load_balance_settings() -> dict:
+    if DATABASE_ENABLED:
+        stored = storage.load_game_setting("balance")
+    else:
+        try:
+            stored = json.loads(BALANCE_FILE.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            stored = None
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"El archivo de balance no es JSON válido: {BALANCE_FILE}") from error
+    if stored is None:
+        return dict(BALANCE_DEFAULTS)
+    try:
+        return validate_balance_values(stored, require_all=False)
+    except ValueError as error:
+        raise RuntimeError(f"La configuración de balance guardada no es válida: {error}") from error
+
+
+def save_balance_settings(values: dict) -> None:
+    now = time.time()
+    if DATABASE_ENABLED:
+        storage.save_game_setting("balance", values, now)
+        return
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix="balance-", suffix=".tmp", dir=DATA_DIR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(values, stream, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp_name, BALANCE_FILE)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def public_balance() -> dict:
+    with BALANCE_LOCK:
+        return dict(BALANCE_SETTINGS)
+
+
+def admin_balance_payload() -> dict:
+    values = public_balance()
+    return {
+        "fields": [
+            {**field, "value": values[field["id"]]}
+            for field in BALANCE_FIELD_DEFINITIONS
+        ],
+        "values": values,
+    }
 
 
 def load_accounts() -> dict:
@@ -300,6 +464,7 @@ def admin_overview() -> dict:
     }
 
 
+BALANCE_SETTINGS = load_balance_settings()
 ACCOUNTS = load_accounts()
 GAME_SAVES = load_game_saves()
 WORLDS.update(load_shared_worlds())
@@ -561,6 +726,9 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
 
     def do_GET(self) -> None:
         parsed = urlsplit(self.path)
+        if parsed.path == "/api/game-config":
+            self.send_json(200, {"balance": public_balance()})
+            return
         if parsed.path == "/api/health":
             try:
                 if DATABASE_ENABLED:
@@ -583,6 +751,16 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 self.send_json(401, {"error": "Inicia sesión para consultar el acceso."})
                 return
             self.send_json(200, {"isAdmin": is_server_admin(account)})
+            return
+        if parsed.path == "/api/admin/balance":
+            account = authenticated_user(self)
+            if not account:
+                self.send_json(401, {"error": "Inicia sesión para consultar el balance."})
+                return
+            if not is_server_admin(account):
+                self.send_json(403, {"error": "Esta cuenta no tiene permisos de administrador del servidor."})
+                return
+            self.send_json(200, admin_balance_payload())
             return
         if parsed.path == "/api/admin/overview":
             account = authenticated_user(self)
@@ -608,6 +786,9 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             return
         if parsed.path != "/api/players":
             if not parsed.path.startswith("/api/"):
+                if parsed.path.casefold() == "/balance":
+                    self.path = "/balance.html"
+                    return super().do_GET()
                 requested_path = Path(self.translate_path(parsed.path)).resolve()
                 data_path = DATA_DIR.resolve()
                 if requested_path == data_path or data_path in requested_path.parents:
@@ -632,13 +813,15 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 "worldOwners": dict(WORLD_OWNERS),
                 "worlds": {key: public_world(world) for key, world in WORLDS.items()},
                 "spaceWorld": public_space_world(),
+                "balance": public_balance(),
             }
         self.send_json(200, result)
 
     def do_POST(self) -> None:
         global WORLDS_DIRTY
         route = urlsplit(self.path).path
-        if route not in ("/api/players", "/api/save", "/api/auth/register", "/api/auth/login", "/api/auth/logout"):
+        if route not in ("/api/players", "/api/save", "/api/admin/balance",
+                         "/api/auth/register", "/api/auth/login", "/api/auth/logout"):
             self.send_json(404, {"error": "not found"})
             return
         if route == "/api/auth/logout":
@@ -666,7 +849,9 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
         try:
             size = int(self.headers.get("Content-Length", "0"))
             max_size = 16_384 if route.startswith("/api/auth/") else (
-                MAX_SAVE_BYTES if route == "/api/save" else MAX_REQUEST_BYTES
+                MAX_SAVE_BYTES if route == "/api/save" else (
+                    64_000 if route == "/api/admin/balance" else MAX_REQUEST_BYTES
+                )
             )
             if size <= 0 or size > max_size:
                 self.send_json(413, {"error": "invalid request size"})
@@ -741,6 +926,27 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                         GAME_SAVES[account["id"]] = payload["state"]
                         save_game_saves(GAME_SAVES)
                 self.send_json(200, {"ok": True})
+                return
+
+            if route == "/api/admin/balance":
+                account = authenticated_user(self)
+                if not account:
+                    self.send_json(401, {"error": "Inicia sesión para guardar el balance."})
+                    return
+                if not is_server_admin(account):
+                    self.send_json(403, {"error": "Esta cuenta no tiene permisos para modificar el balance."})
+                    return
+                try:
+                    values = validate_balance_values(payload.get("values") if isinstance(payload, dict) else None,
+                                                     require_all=True)
+                except ValueError as error:
+                    self.send_json(400, {"error": str(error)})
+                    return
+                with BALANCE_LOCK:
+                    save_balance_settings(values)
+                    BALANCE_SETTINGS.clear()
+                    BALANCE_SETTINGS.update(values)
+                self.send_json(200, {"ok": True, "values": values})
                 return
 
             snapshot = payload
@@ -827,6 +1033,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 "worlds": visible_worlds,
                 "spaceWorld": public_space_world(),
                 "spaceHitResults": space_hit_results,
+                "balance": public_balance(),
             }
         self.send_json(200, result)
 
