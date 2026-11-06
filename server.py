@@ -416,7 +416,7 @@ def sanitize_martian_enemy(enemy: object) -> dict | None:
     }
 
 
-def public_world(world: dict, snapshot: dict | None = None, player_id: str = "") -> dict:
+def public_world(world: dict, snapshot: dict | None = None) -> dict:
     public = {key: value for key, value in world.items() if not key.startswith("_")}
     pickups = sanitize_shared_pickups(world.get("pickups", []))
     revision = world.get("_pickupRevision", 0)
@@ -446,17 +446,7 @@ def public_world(world: dict, snapshot: dict | None = None, player_id: str = "")
     public["pickups"] = [pickup for pickup in pickups if is_nearby(pickup)]
     enemies = world.get("_martianEnemies", {})
     public["martianEnemies"] = [
-        {
-            **{
-                key: value for key, value in enemy.items()
-                if key not in ("_simulatorId", "_updatedAt")
-            },
-            "simulateHere": enemy.get("_simulatorId") == player_id or not (
-                PLAYERS.get(enemy.get("_simulatorId"), {}).get("snapshot", {}).get("scene") == "surface"
-                and str(PLAYERS.get(enemy.get("_simulatorId"), {}).get("snapshot", {}).get("planet", "")).lower()
-                == str(world.get("planet", "")).lower()
-            ),
-        }
+        {key: value for key, value in enemy.items() if not key.startswith("_")}
         for enemy in enemies.values()
         if isinstance(enemies, dict) and isinstance(enemy, dict) and enemy.get("hp", 0) > 0 and is_nearby(enemy)
     ][:MAX_SHARED_MARTIAN_ENEMIES] if isinstance(enemies, dict) else []
@@ -931,7 +921,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             result = {
                 "players": players,
                 "worlds": {
-                    planet: public_world(WORLDS[planet], self_snapshot, self_id)
+                    planet: public_world(WORLDS[planet], self_snapshot)
                 } if planet in WORLDS else {},
                 "spaceWorld": public_space_world(),
                 "balance": public_balance(),
@@ -1160,7 +1150,6 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                         if clean_enemy:
                             enemy_states[clean_enemy["id"]] = {
                                 **clean_enemy,
-                                "_simulatorId": "",
                                 "_updatedAt": now,
                             }
                 incoming_deaths = surface_world.get("deadMartianEnemyIds", [])
@@ -1179,7 +1168,6 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                         clean_enemy = sanitize_martian_enemy(raw_enemy)
                         if clean_enemy:
                             sanitized_enemies.append(clean_enemy)
-                    incoming_enemy_ids = {enemy["id"] for enemy in sanitized_enemies}
                     for enemy in sanitized_enemies:
                         enemy_id = enemy["id"]
                         if enemy_id in dead_enemy_set:
@@ -1189,38 +1177,18 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                             if enemy["hp"] > 0:
                                 enemy_states[enemy_id] = {
                                     **enemy,
-                                    "_simulatorId": player_id,
                                     "_updatedAt": now,
                                 }
                             continue
 
-                        previous_simulator_id = previous_enemy.get("_simulatorId", "")
-                        previous_simulator = PLAYERS.get(previous_simulator_id)
-                        previous_simulator_snapshot = previous_simulator.get("snapshot", {}) if previous_simulator else {}
-                        simulator_is_here = (
-                            previous_simulator_snapshot.get("scene") == "surface"
-                            and str(previous_simulator_snapshot.get("planet", "")).strip().lower() == planet
-                        )
-                        if previous_simulator_id == player_id or not simulator_is_here:
-                            enemy_states[enemy_id] = {
-                                **enemy,
-                                "hp": min(previous_enemy.get("hp", enemy["hp"]), enemy["hp"]),
-                                "_simulatorId": player_id,
-                                "_updatedAt": now,
-                            }
-                        else:
-                            previous_enemy["hp"] = min(previous_enemy.get("hp", enemy["hp"]), enemy["hp"])
-                            previous_enemy["_updatedAt"] = now
-                        if enemy_states.get(enemy_id, {}).get("hp", 0) <= 0:
+                        previous_enemy.pop("_simulatorId", None)
+                        previous_enemy["hp"] = min(previous_enemy.get("hp", enemy["hp"]), enemy["hp"])
+                        previous_enemy["_updatedAt"] = now
+                        if previous_enemy["hp"] <= 0:
                             enemy_states.pop(enemy_id, None)
-                            dead_enemy_ids.append(enemy_id)
-                            dead_enemy_set.add(enemy_id)
-
-                    for enemy_id, enemy in list(enemy_states.items()):
-                        if enemy.get("_simulatorId") == player_id and enemy_id not in incoming_enemy_ids:
-                            enemy_states.pop(enemy_id, None)
-                            dead_enemy_ids.append(enemy_id)
-                            dead_enemy_set.add(enemy_id)
+                            if enemy_id not in dead_enemy_set:
+                                dead_enemy_ids.append(enemy_id)
+                                dead_enemy_set.add(enemy_id)
 
                 for enemy_id, enemy in list(enemy_states.items()):
                     if now - enemy.get("_updatedAt", now) > PLAYER_TTL_SECONDS:
@@ -1244,7 +1212,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 save_shared_worlds(now)
 
             visible_worlds = {
-                planet: public_world(WORLDS[planet], snapshot, player_id)
+                planet: public_world(WORLDS[planet], snapshot)
             } if planet in WORLDS else {}
             result = {
                 "ok": True,

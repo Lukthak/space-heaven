@@ -1721,20 +1721,11 @@ function applySharedSurfaceWorld(dt, blend) {
         shotUntil: 0,
       };
       enemy.multiplayerPendingUntil = 0;
-      enemy.multiplayerSimulatedHere = target.simulateHere === true;
       enemy.type = target.type;
       enemy.planetName = game.surface.planet.name;
       enemy.runSpeedMultiplier = target.type === 'lunatic' ? 2 : 1;
       enemy.hp = Math.min(enemy.hp, target.hp);
       enemy.maxHp = target.maxHp;
-      enemy.ammo = target.ammo;
-      enemy.maxAmmo = target.maxAmmo;
-      enemy.facing = target.facing;
-      enemy.isMoving = target.isMoving;
-      enemy.animationFrame = target.animationFrame;
-      if (target.shooting) enemy.shotUntil = game.time + 0.12;
-      enemy.multiplayerTargetX = target.x * SURFACE_WORLD_SIZE;
-      enemy.multiplayerTargetY = target.y * SURFACE_WORLD_SIZE;
       return enemy;
     });
     const pendingEnemies = [...currentEnemies.values()].filter((enemy) =>
@@ -1742,14 +1733,6 @@ function applySharedSurfaceWorld(dt, blend) {
       !targetIds.has(enemy.id)
     );
     game.martianEnemies = [...synchronizedEnemies, ...pendingEnemies];
-    for (const enemy of synchronizedEnemies) {
-      enemy.x = wrapSurfaceCoordinate(
-        enemy.x + getSurfaceAxisDelta(enemy.multiplayerTargetX, enemy.x) * blend
-      );
-      enemy.y = wrapSurfaceCoordinate(
-        enemy.y + getSurfaceAxisDelta(enemy.multiplayerTargetY, enemy.y) * blend
-      );
-    }
   }
 }
 
@@ -2166,7 +2149,6 @@ function spawnMartianEnemy(distanceTiles = null, type = 'martian', preferredDire
     id: `${multiplayerPlayerId}:${globalThis.crypto?.randomUUID?.() ?? game.martianEnemySequence++}`,
     type,
     planetName: game.surface.planet.name,
-    multiplayerSimulatedHere: true,
     runSpeedMultiplier: lunatic ? 2 : 1,
     x: point.x,
     y: point.y,
@@ -2696,7 +2678,7 @@ function updateMartianEnemies(dt) {
       game.martianEnemies.splice(index, 1);
       continue;
     }
-    if (!multiplayerReady || enemy.multiplayerSimulatedHere) updateMartianEnemy(enemy, dt);
+    updateMartianEnemy(enemy, dt);
   }
 }
 
