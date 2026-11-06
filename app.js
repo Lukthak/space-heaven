@@ -1716,9 +1716,21 @@ function applySharedSurfaceWorld(dt, blend) {
         ammo: target.ammo,
         maxAmmo: target.maxAmmo,
         facing: target.facing,
-        isMoving: target.isMoving,
-        animationFrame: target.animationFrame,
+        isMoving: false,
+        animationFrame: 1,
+        animationTimer: 0,
         shotUntil: 0,
+        fireCooldown: 0.6 + Math.random() * 0.8,
+        reloadUntil: 0,
+        reloadStartedAt: 0,
+        loot: {},
+        miningTargetId: null,
+        miningUntil: 0,
+        step: null,
+        turnUntil: 0,
+        wait: 0.2,
+        pathThinkTimer: 0,
+        pathDirection: null,
       };
       enemy.multiplayerPendingUntil = 0;
       enemy.type = target.type;
