@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-import json
+import copy
 import hashlib
 import hmac
+import json
+import math
 import os
 import re
 import secrets
@@ -24,6 +26,12 @@ STATE_LOCK = threading.RLock()
 PLAYERS: dict[str, dict] = {}
 WORLDS: dict[str, dict] = {}
 WORLD_OWNERS: dict[str, str] = {}
+SPACE_OWNER_ID = ""
+SPACE_WORLD = {"drones": [], "projectiles": []}
+SPACE_HIT_EVENT_RESULTS: dict[str, dict] = {}
+MAX_SPACE_DRONES = 100
+MAX_SPACE_PROJECTILES = 500
+SPACE_HIT_EVENT_TTL_SECONDS = 30
 DATA_DIR = Path(os.environ.get("SPACEHEAVEN_DATA_DIR", ROOT / "data"))
 ACCOUNTS_FILE = DATA_DIR / "accounts.json"
 SAVES_FILE = DATA_DIR / "saves.json"
@@ -346,6 +354,148 @@ def public_player_snapshot(snapshot: dict) -> dict:
     return {key: value for key, value in snapshot.items() if key not in ("surfaceWorld", "collectedPickupIds")}
 
 
+def refresh_space_owner() -> None:
+    global SPACE_OWNER_ID
+    owner = PLAYERS.get(SPACE_OWNER_ID)
+    if owner and owner["snapshot"].get("scene") == "space":
+        return
+    SPACE_OWNER_ID = next((
+        player_id for player_id, entry in PLAYERS.items()
+        if entry["snapshot"].get("scene") == "space"
+    ), "")
+
+
+def sanitize_space_entities(value: object, kind: str) -> list[dict] | None:
+    if not isinstance(value, list):
+        return None
+    if kind == "drone":
+        allowed = {
+            "id", "x", "y", "velocityX", "velocityY", "stats", "hp", "fuel", "fuelStacks",
+            "propulsionDistance", "abilityDecisionTimer", "propulsionAbilityReadyAt",
+            "propulsionBoost", "centerAbilityReadyAt", "centerHomingUntil", "centerHomingAttacks",
+            "fireTimer", "angle", "shipParts", "targetPlayerId", "muzzleFlashUntil", "muzzleFlashShape",
+        }
+        max_count = MAX_SPACE_DRONES
+        required_numbers = ("x", "y", "velocityX", "velocityY", "hp", "angle")
+    else:
+        allowed = {
+            "id", "x", "y", "vx", "vy", "damage", "life", "homingTargetId", "homingUntil",
+        }
+        max_count = MAX_SPACE_PROJECTILES
+        required_numbers = ("x", "y", "vx", "vy", "damage", "life")
+
+    entities = []
+    seen_ids = set()
+    for item in value[:max_count]:
+        if not isinstance(item, dict):
+            continue
+        entity_id = item.get("id")
+        if not isinstance(entity_id, str) or not entity_id or len(entity_id) > 128 or entity_id in seen_ids:
+            continue
+        clean = {key: item[key] for key in allowed if key in item}
+        if any(
+            isinstance(clean.get(key), bool)
+            or not isinstance(clean.get(key), (int, float))
+            or not math.isfinite(clean[key])
+            for key in required_numbers
+        ):
+            continue
+        if kind == "drone" and (
+            not isinstance(clean.get("stats"), dict) or not isinstance(clean.get("shipParts"), dict)
+        ):
+            continue
+        try:
+            if len(json.dumps(clean, allow_nan=False)) > 20_000:
+                continue
+        except (TypeError, ValueError):
+            continue
+        seen_ids.add(entity_id)
+        entities.append(clean)
+    return entities
+
+
+def update_space_world(snapshot: dict, player_id: str, now: float) -> list[dict]:
+    global SPACE_WORLD
+    results = []
+    if snapshot.get("scene") != "space":
+        return results
+
+    if player_id == SPACE_OWNER_ID:
+        incoming = snapshot.get("spaceWorld")
+        if isinstance(incoming, dict):
+            drones = sanitize_space_entities(incoming.get("drones"), "drone")
+            projectiles = sanitize_space_entities(incoming.get("projectiles"), "projectile")
+            if drones is not None and projectiles is not None:
+                previous_drones = {drone["id"]: drone for drone in SPACE_WORLD["drones"]}
+                for drone in drones:
+                    previous = previous_drones.get(drone["id"])
+                    if previous:
+                        drone["hp"] = min(drone["hp"], previous["hp"])
+                SPACE_WORLD = {"drones": drones, "projectiles": projectiles}
+
+    hit_events = snapshot.get("spaceHitEvents", [])
+    for event in hit_events[:64] if isinstance(hit_events, list) else []:
+        if not isinstance(event, dict):
+            continue
+        event_id = event.get("id")
+        drone_id = event.get("droneId")
+        created_at = event.get("createdAt")
+        damage = event.get("damage")
+        if isinstance(created_at, (int, float)) and created_at > 100_000_000_000:
+            created_at /= 1000
+        if (
+            not isinstance(event_id, str) or not event_id.startswith(f"{player_id}:") or len(event_id) > 160
+            or not isinstance(drone_id, str) or len(drone_id) > 128
+            or isinstance(created_at, bool) or not isinstance(created_at, (int, float))
+            or now - 10 > created_at or created_at > now + 5
+            or isinstance(damage, bool) or not isinstance(damage, (int, float))
+            or not math.isfinite(damage) or damage <= 0
+        ):
+            continue
+        previous_result = SPACE_HIT_EVENT_RESULTS.get(event_id)
+        if previous_result:
+            if previous_result["playerId"] == player_id:
+                results.append(previous_result["result"])
+            continue
+
+        killed = False
+        if player_id != SPACE_OWNER_ID:
+            for index, drone in enumerate(SPACE_WORLD["drones"]):
+                if drone["id"] != drone_id:
+                    continue
+                drone["hp"] = max(0, drone["hp"] - min(damage, 1000))
+                killed = drone["hp"] <= 0
+                if killed:
+                    SPACE_WORLD["drones"].pop(index)
+                break
+        result = {"id": event_id, "killed": killed}
+        SPACE_HIT_EVENT_RESULTS[event_id] = {
+            "playerId": player_id,
+            "createdAt": now,
+            "result": result,
+        }
+        results.append(result)
+
+    for event_id, event in list(SPACE_HIT_EVENT_RESULTS.items()):
+        if now - event["createdAt"] > SPACE_HIT_EVENT_TTL_SECONDS:
+            SPACE_HIT_EVENT_RESULTS.pop(event_id, None)
+    if len(SPACE_HIT_EVENT_RESULTS) > 5000:
+        oldest = sorted(
+            SPACE_HIT_EVENT_RESULTS.items(),
+            key=lambda item: item[1]["createdAt"],
+        )[:len(SPACE_HIT_EVENT_RESULTS) - 5000]
+        for event_id, _ in oldest:
+            SPACE_HIT_EVENT_RESULTS.pop(event_id, None)
+    return results
+
+
+def public_space_world() -> dict:
+    return {
+        "ownerId": SPACE_OWNER_ID,
+        **copy.deepcopy(SPACE_WORLD),
+    }
+
+
 def prune_stale_players(now: float) -> None:
     stale_ids = [
         player_id for player_id, entry in PLAYERS.items()
@@ -380,6 +530,7 @@ def prune_stale_players(now: float) -> None:
             WORLD_OWNERS[world_key] = replacement
         else:
             WORLD_OWNERS.pop(world_key, None)
+    refresh_space_owner()
 
 
 class SpaceHeavenHandler(SimpleHTTPRequestHandler):
@@ -480,6 +631,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 "players": players,
                 "worldOwners": dict(WORLD_OWNERS),
                 "worlds": {key: public_world(world) for key, world in WORLDS.items()},
+                "spaceWorld": public_space_world(),
             }
         self.send_json(200, result)
 
@@ -612,6 +764,8 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             if player_id not in PLAYERS:
                 record_activity("connect", player_id, account["username"])
             PLAYERS[player_id] = {"snapshot": snapshot, "seen_at": now}
+            refresh_space_owner()
+            space_hit_results = update_space_world(snapshot, player_id, now)
             surface_world = snapshot.get("surfaceWorld")
             planet = str(snapshot.get("planet", "")).strip().lower()
             if snapshot.get("scene") == "surface" and planet and isinstance(surface_world, dict):
@@ -671,6 +825,8 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 "players": [public_player_snapshot(entry["snapshot"]) for peer_id, entry in PLAYERS.items() if peer_id != player_id],
                 "worldOwners": dict(WORLD_OWNERS),
                 "worlds": visible_worlds,
+                "spaceWorld": public_space_world(),
+                "spaceHitResults": space_hit_results,
             }
         self.send_json(200, result)
 

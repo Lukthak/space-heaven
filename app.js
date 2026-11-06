@@ -148,12 +148,16 @@ let multiplayerWorldNeedsAuthoritySync = false;
 let multiplayerWorlds = {};
 let multiplayerWorldRevision = 0;
 let multiplayerAppliedWorldRevision = -1;
+let multiplayerSpaceOwnerId = '';
+let multiplayerIsSpaceOwner = false;
 let multiplayerEarthWandererTarget = null;
 let multiplayerMartianTargets = null;
 let multiplayerMartianEnemyTargets = null;
 let multiplayerProjectileSequence = 0;
 const multiplayerCombatEvents = [];
+const multiplayerSpaceEnemyHitEvents = [];
 const processedMultiplayerCombatEvents = new Map();
+const processedMultiplayerSpaceHitResults = new Set();
 const multiplayerSyncedSurfaceEntities = new Set();
 const multiplayerEndpoint = /^https?:$/.test(location.protocol)
   ? `${location.origin}/api/players`
@@ -883,6 +887,10 @@ function sendChatMessage(text) {
   }
   if (/^\/enemy(?:\s|$)/i.test(message)) {
     if (game.scene === 'space') {
+      if (!canSimulateHostileSpaceWorld()) {
+        setMessage('El servidor está sincronizando los enemigos espaciales. Inténtalo de nuevo en un momento.');
+        return;
+      }
       for (let index = 0; index < 3; index += 1) spawnHostileDrone();
       showPlayerChatMessage('/enemy');
       setMessage('¡Aparecieron 3 enemigos cerca de tu nave!');
@@ -1019,6 +1027,29 @@ function getMultiplayerSnapshot() {
   while (multiplayerCombatEvents.length && now - multiplayerCombatEvents[0].createdAt > 10000) {
     multiplayerCombatEvents.shift();
   }
+  while (multiplayerSpaceEnemyHitEvents.length && now - multiplayerSpaceEnemyHitEvents[0].createdAt > 10000) {
+    multiplayerSpaceEnemyHitEvents.shift();
+  }
+  const spaceWorld = game.scene === 'space' && multiplayerIsSpaceOwner ? {
+    drones: game.hostileDrones.map((drone) => ({
+      ...drone,
+      id: drone.multiplayerId,
+    })),
+    projectiles: game.hostileProjectiles.map((projectile) => {
+      projectile.multiplayerId ??= `${multiplayerPlayerId}:enemy-shot:${++multiplayerProjectileSequence}`;
+      return {
+        id: projectile.multiplayerId,
+        x: projectile.x,
+        y: projectile.y,
+        vx: projectile.vx,
+        vy: projectile.vy,
+        damage: projectile.damage,
+        life: projectile.life,
+        homingTargetId: projectile.homingTargetId || '',
+        homingUntil: projectile.homingUntil || 0,
+      };
+    }),
+  } : null;
   return {
     id: multiplayerPlayerId,
     name: multiplayerName,
@@ -1039,6 +1070,8 @@ function getMultiplayerSnapshot() {
     capsule,
     projectiles,
     combatEvents: multiplayerCombatEvents,
+    spaceWorld,
+    spaceHitEvents: multiplayerSpaceEnemyHitEvents,
     surfaceWorld,
     collectedPickupIds: [...game.player.collectedPickupIds].slice(-5000),
     chat: Date.now() < multiplayerChatMessageUntil ? multiplayerChatMessage : '',
@@ -1115,6 +1148,83 @@ function applyMultiplayerCombatEvents(players) {
             setCombatMessage(`¡Impacto de otro jugador! ${result.hp}/${result.maxHealth} HP en la nave.`);
           }
         }
+      }
+    }
+  }
+}
+
+function applyMultiplayerSpaceWorld(spaceWorld, wasSpaceOwner, submittedSpaceWorld) {
+  const ownerId = typeof spaceWorld?.ownerId === 'string' ? spaceWorld.ownerId : '';
+  const isNowSpaceOwner = ownerId === multiplayerPlayerId;
+  const serverDrones = Array.isArray(spaceWorld?.drones) ? spaceWorld.drones : [];
+  const serverProjectiles = Array.isArray(spaceWorld?.projectiles) ? spaceWorld.projectiles : [];
+  multiplayerSpaceOwnerId = ownerId;
+  multiplayerIsSpaceOwner = isNowSpaceOwner;
+
+  if (isNowSpaceOwner && wasSpaceOwner) {
+    const submittedDroneIds = new Set((submittedSpaceWorld?.drones || []).map((drone) => drone.id));
+    const serverDronesById = new Map(serverDrones.map((drone) => [drone.id, drone]));
+    game.hostileDrones = game.hostileDrones.filter((drone) => {
+      const authoritative = serverDronesById.get(drone.multiplayerId);
+      if (!authoritative && submittedDroneIds.has(drone.multiplayerId)) return false;
+      if (authoritative) drone.hp = Math.min(drone.hp, authoritative.hp);
+      return true;
+    });
+
+    const submittedProjectileIds = new Set((submittedSpaceWorld?.projectiles || []).map((projectile) => projectile.id));
+    const serverProjectileIds = new Set(serverProjectiles.map((projectile) => projectile.id));
+    game.hostileProjectiles = game.hostileProjectiles.filter((projectile) =>
+      !submittedProjectileIds.has(projectile.multiplayerId) || serverProjectileIds.has(projectile.multiplayerId)
+    );
+    return;
+  }
+
+  const previousDrones = new Map(game.hostileDrones.map((drone) => [drone.multiplayerId, drone]));
+  game.hostileDrones = serverDrones.map((serverDrone) => {
+    const drone = previousDrones.get(serverDrone.id) || {};
+    Object.assign(drone, serverDrone, { multiplayerId: serverDrone.id });
+    if (isNowSpaceOwner && !wasSpaceOwner) {
+      drone.propulsionBoost = null;
+      drone.propulsionAbilityReadyAt = game.time;
+      drone.centerAbilityReadyAt = game.time;
+      drone.centerHomingUntil = 0;
+      drone.centerHomingAttacks = 0;
+    }
+    return drone;
+  });
+  const previousProjectiles = new Map(
+    game.hostileProjectiles.map((projectile) => [projectile.multiplayerId, projectile])
+  );
+  game.hostileProjectiles = serverProjectiles.map((serverProjectile) => {
+    const projectile = previousProjectiles.get(serverProjectile.id) || {};
+    Object.assign(projectile, serverProjectile, { multiplayerId: serverProjectile.id });
+    if (isNowSpaceOwner && !wasSpaceOwner) {
+      projectile.homingTargetId = '';
+      projectile.homingUntil = game.time - 1;
+    }
+    return projectile;
+  });
+  if (isNowSpaceOwner && game.hostileDrones.length === 0) {
+    game.hostileSpawnTimer = Math.min(game.hostileSpawnTimer, 1);
+  }
+}
+
+function applyMultiplayerSpaceHitResults(results) {
+  if (!Array.isArray(results) || results.length === 0) return;
+  const acknowledgedIds = new Set();
+  for (const result of results) {
+    if (!result?.id || processedMultiplayerSpaceHitResults.has(result.id)) continue;
+    acknowledgedIds.add(result.id);
+    processedMultiplayerSpaceHitResults.add(result.id);
+    if (result.killed) handleEnemyDestroyed();
+  }
+  while (processedMultiplayerSpaceHitResults.size > 500) {
+    processedMultiplayerSpaceHitResults.delete(processedMultiplayerSpaceHitResults.values().next().value);
+  }
+  if (acknowledgedIds.size) {
+    for (let index = multiplayerSpaceEnemyHitEvents.length - 1; index >= 0; index -= 1) {
+      if (acknowledgedIds.has(multiplayerSpaceEnemyHitEvents[index].id)) {
+        multiplayerSpaceEnemyHitEvents.splice(index, 1);
       }
     }
   }
@@ -1305,6 +1415,10 @@ async function logout() {
   authGate.hidden = false;
   multiplayerPlayers = [];
   multiplayerReady = false;
+  multiplayerSpaceOwnerId = '';
+  multiplayerIsSpaceOwner = false;
+  multiplayerSpaceEnemyHitEvents.length = 0;
+  processedMultiplayerSpaceHitResults.clear();
   game.keys = {};
   closePauseMenu();
   multiplayerStatus.hidden = true;
@@ -1337,14 +1451,16 @@ async function syncMultiplayer(force = false) {
   }
   multiplayerSyncBusy = true;
   const syncStartedAt = performance.now();
+  const wasSpaceOwner = multiplayerIsSpaceOwner;
   try {
+    const snapshot = getMultiplayerSnapshot();
     const response = await fetch(multiplayerEndpoint, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: 'Bearer ' + authToken,
       },
-      body: JSON.stringify(getMultiplayerSnapshot()),
+      body: JSON.stringify(snapshot),
       cache: 'no-store',
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -1383,6 +1499,8 @@ async function syncMultiplayer(force = false) {
       };
     }) : [];
     applyMultiplayerCombatEvents(multiplayerPlayers);
+    applyMultiplayerSpaceWorld(responseState.spaceWorld, wasSpaceOwner, snapshot.spaceWorld);
+    applyMultiplayerSpaceHitResults(responseState.spaceHitResults);
     multiplayerReady = true;
     const count = multiplayerPlayers.length;
     multiplayerStatus.textContent = `Online: ${count + 1}`;
@@ -8650,7 +8768,34 @@ function interactWithWorld() {
   handleEnter();
 }
 
-function spawnHostileDrone() {
+function getSpaceCombatTargets() {
+  const targets = [{
+    id: multiplayerPlayerId,
+    x: game.player.x,
+    y: game.player.y,
+    velocityX: game.player.velocityX,
+    velocityY: game.player.velocityY,
+    capsule: game.emergencyCapsule?.stage === 2 ? 2 : 0,
+  }];
+  if (multiplayerReady) {
+    for (const player of multiplayerPlayers) {
+      if (player.scene !== 'space' || player.capsule === 2) continue;
+      targets.push(player);
+    }
+  }
+  return targets;
+}
+
+function getSpaceCombatTarget(playerId) {
+  return getSpaceCombatTargets().find((target) => target.id === playerId) || null;
+}
+
+function canSimulateHostileSpaceWorld() {
+  const hasOnlineSession = Boolean(multiplayerEndpoint && authReady && authToken);
+  return !hasOnlineSession || (multiplayerReady && multiplayerIsSpaceOwner);
+}
+
+function spawnHostileDrone(target = game.player, targetPlayerId = multiplayerPlayerId) {
   const angle = Math.random() * Math.PI * 2;
   const distance = CHUNK_SIZE * 4;
   const choosePart = (group) => {
@@ -8688,8 +8833,10 @@ function spawnHostileDrone() {
     weaponShots: tipStats.weaponShots ?? 1,
   };
   game.hostileDrones.push({
-    x: game.player.x + Math.cos(angle) * distance,
-    y: game.player.y + Math.sin(angle) * distance,
+    multiplayerId: `${multiplayerPlayerId}:drone:${++multiplayerProjectileSequence}`,
+    targetPlayerId,
+    x: target.x + Math.cos(angle) * distance,
+    y: target.y + Math.sin(angle) * distance,
     velocityX: 0,
     velocityY: 0,
     stats,
@@ -8745,16 +8892,33 @@ function playShipShotSound(sourceX, sourceY) {
 }
 
 function updateHostileCombat(dt, controlsEnabled) {
-  if (game.scene !== 'space') return;
+  if (game.scene !== 'space' || !canSimulateHostileSpaceWorld()) return;
+  const targets = getSpaceCombatTargets();
   game.hostileSpawnTimer -= dt;
   if (game.hostileSpawnTimer <= 0) {
-    if (game.hostileDrones.length < 1) spawnHostileDrone();
+    const spawnTarget = targets.find((target) =>
+      !game.hostileDrones.some((drone) =>
+        drone.targetPlayerId === target.id &&
+        Math.hypot(drone.x - target.x, drone.y - target.y) < CHUNK_SIZE * 12
+      )
+    );
+    if (spawnTarget && game.hostileDrones.length < Math.min(20, targets.length * 2)) {
+      spawnHostileDrone(spawnTarget, spawnTarget.id);
+    }
     game.hostileSpawnTimer = 42;
   }
   for (let index = game.hostileDrones.length - 1; index >= 0; index -= 1) {
     const drone = game.hostileDrones[index];
-    const dx = game.player.x - drone.x;
-    const dy = game.player.y - drone.y;
+    let target = getSpaceCombatTarget(drone.targetPlayerId);
+    if (!target) {
+      target = targets.reduce((nearest, candidate) =>
+        Math.hypot(candidate.x - drone.x, candidate.y - drone.y) <
+        Math.hypot(nearest.x - drone.x, nearest.y - drone.y) ? candidate : nearest
+      );
+      drone.targetPlayerId = target.id;
+    }
+    const dx = target.x - drone.x;
+    const dy = target.y - drone.y;
     const distance = Math.hypot(dx, dy);
     if (distance > CHUNK_SIZE * HOSTILE_LIFETIME_RANGE_CHUNKS) {
       game.hostileDrones.splice(index, 1);
@@ -8796,8 +8960,8 @@ function updateHostileCombat(dt, controlsEnabled) {
     const leadTime = isPursuing
       ? clamp(distance / Math.max(currentMaxSpeed, 1), 0, 0.9)
       : 0;
-    const targetX = game.player.x + game.player.velocityX * leadTime;
-    const targetY = game.player.y + game.player.velocityY * leadTime;
+    const targetX = target.x + target.velocityX * leadTime;
+    const targetY = target.y + target.velocityY * leadTime;
     const targetDx = targetX - drone.x;
     const targetDy = targetY - drone.y;
     const targetDistance = Math.hypot(targetDx, targetDy);
@@ -8861,7 +9025,7 @@ function updateHostileCombat(dt, controlsEnabled) {
           vy: Math.sin(shotAngle) * projectileSpeed,
           damage: drone.stats.weaponDamage,
           life: 5.2,
-          homingTarget: usesHomingVolley ? game.player : null,
+          homingTargetId: usesHomingVolley ? target.id : '',
           homingUntil: drone.centerHomingUntil,
         });
       }
@@ -8873,12 +9037,13 @@ function updateHostileCombat(dt, controlsEnabled) {
 
   for (let index = game.hostileProjectiles.length - 1; index >= 0; index -= 1) {
     const projectile = game.hostileProjectiles[index];
-    if (projectile.homingTarget === game.player && game.time < projectile.homingUntil) {
+    const homingTarget = getSpaceCombatTarget(projectile.homingTargetId);
+    if (homingTarget && game.time < projectile.homingUntil) {
       const speed = Math.hypot(projectile.vx, projectile.vy);
       if (speed > 0) {
         const targetAngle = Math.atan2(
-          game.player.y + game.player.velocityY * 0.25 - projectile.y,
-          game.player.x + game.player.velocityX * 0.25 - projectile.x
+          homingTarget.y + homingTarget.velocityY * 0.25 - projectile.y,
+          homingTarget.x + homingTarget.velocityX * 0.25 - projectile.x
         );
         const currentAngle = Math.atan2(projectile.vy, projectile.vx);
         const angleDelta = ((targetAngle - currentAngle + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
@@ -8920,6 +9085,21 @@ function updateHostileCombat(dt, controlsEnabled) {
             : `¡Impacto en ${slotName}! ${result.hp}/${result.maxHealth} HP.`);
         }
       }
+      game.hostileProjectiles.splice(index, 1);
+      continue;
+    }
+    const hitRemote = multiplayerReady ? multiplayerPlayers.find((remote) =>
+      remote.scene === 'space' &&
+      remote.capsule !== 2 &&
+      Math.hypot(projectile.x - remote.x, projectile.y - remote.y) <= 13
+    ) : null;
+    if (hitRemote) {
+      const capsule = hitRemote.capsule === 1;
+      const slot = capsule ? null : getRemoteShipPartSlotAtImpact(hitRemote, projectile.x, projectile.y);
+      reportMultiplayerHit(hitRemote, 'space', projectile.damage ?? 12, projectile.x, projectile.y, {
+        capsule,
+        slot,
+      });
       game.hostileProjectiles.splice(index, 1);
     }
   }
@@ -9022,10 +9202,19 @@ function updatePlayerWeapon(dt, controlsEnabled) {
     let hitIndex = -1;
     for (let droneIndex = game.hostileDrones.length - 1; droneIndex >= 0; droneIndex -= 1) {
       const drone = game.hostileDrones[droneIndex];
-      if (projectile.hitDrones?.has(drone)) continue;
+      if (projectile.hitDrones?.has(drone.multiplayerId)) continue;
       if (distanceToSegment(drone.x, drone.y, previousX, previousY, projectile.x, projectile.y) <= 13) {
         drone.hp -= projectile.damage;
-        projectile.hitDrones?.add(drone);
+        projectile.hitDrones?.add(drone.multiplayerId);
+        if (!canSimulateHostileSpaceWorld()) {
+          multiplayerSpaceEnemyHitEvents.push({
+            id: `${multiplayerPlayerId}:${Date.now()}:${++multiplayerProjectileSequence}`,
+            droneId: drone.multiplayerId,
+            damage: projectile.damage,
+            createdAt: Date.now(),
+          });
+          if (multiplayerSpaceEnemyHitEvents.length > 64) multiplayerSpaceEnemyHitEvents.shift();
+        }
         hitIndex = droneIndex;
         break;
       }
@@ -9052,8 +9241,12 @@ function updatePlayerWeapon(dt, controlsEnabled) {
       if (!projectile.pierce || projectile.life <= 0) game.playerProjectiles.splice(index, 1);
       const hitDrone = game.hostileDrones[hitIndex];
       if (hitDrone.hp <= 0) {
-        game.hostileDrones.splice(hitIndex, 1);
-        handleEnemyDestroyed();
+        if (canSimulateHostileSpaceWorld()) {
+          game.hostileDrones.splice(hitIndex, 1);
+          handleEnemyDestroyed();
+        } else {
+          setPlayerDamageMessage('¡Impacto! Nave enemiga destruida; confirmando con el servidor.');
+        }
       } else {
         setPlayerDamageMessage(`¡Impacto! ${projectile.damage} de daño a la nave enemiga · ${Math.ceil(hitDrone.hp)}/${hitDrone.stats.maxHealth} HP.`);
       }
@@ -9261,7 +9454,10 @@ function drawRemotePlayersSpace() {
     if (remote.scene !== 'space') continue;
     const screenX = remote.drawX - game.player.x + game.width / 2;
     const screenY = remote.drawY - game.player.y + game.height / 2;
-    if (screenX < -100 || screenX > game.width + 100 || screenY < -100 || screenY > game.height + 100) continue;
+    const cameraScale = CAMERA_ZOOM * playerZoom;
+    const viewportX = (screenX - game.width / 2) * cameraScale + game.width / 2;
+    const viewportY = (screenY - game.height / 2) * cameraScale + game.height / 2;
+    if (viewportX < -100 || viewportX > game.width + 100 || viewportY < -100 || viewportY > game.height + 100) continue;
     ctx.save();
     ctx.translate(screenX, screenY);
     ctx.rotate(remote.rotation || 0);
