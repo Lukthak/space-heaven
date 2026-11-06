@@ -22,10 +22,12 @@ PLAYER_TTL_SECONDS = 20
 MAX_REQUEST_BYTES = 2_000_000
 MAX_SAVE_BYTES = 10_000_000
 WORLD_SAVE_INTERVAL_SECONDS = 1
+MAX_SHARED_PLANET_PICKUPS = 10_000
+MAX_SHARED_MARTIAN_ENEMIES = 100
+PICKUP_VISIBILITY_RADIUS = 0.12
 STATE_LOCK = threading.RLock()
 PLAYERS: dict[str, dict] = {}
 WORLDS: dict[str, dict] = {}
-WORLD_OWNERS: dict[str, str] = {}
 SPACE_OWNER_ID = ""
 SPACE_WORLD = {"drones": [], "projectiles": []}
 SPACE_HIT_EVENT_RESULTS: dict[str, dict] = {}
@@ -325,8 +327,140 @@ def save_shared_worlds(now: float, force: bool = False) -> None:
             os.unlink(temp_name)
 
 
-def public_world(world: dict) -> dict:
-    return {key: value for key, value in world.items() if key != "_collectedPickupIds"}
+def sanitize_shared_pickups(pickups: object) -> list[dict]:
+    if not isinstance(pickups, list):
+        return []
+    sanitized = []
+    for pickup in pickups:
+        if not isinstance(pickup, dict):
+            continue
+        pickup_id = pickup.get("id")
+        resource_key = pickup.get("resourceKey")
+        count = pickup.get("count")
+        x = pickup.get("x")
+        y = pickup.get("y")
+        if (
+            not isinstance(pickup_id, str)
+            or not pickup_id
+            or len(pickup_id) > 256
+            or not isinstance(resource_key, str)
+            or len(resource_key) > 64
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or not 1 <= count <= 32
+            or not isinstance(x, (int, float))
+            or isinstance(x, bool)
+            or not math.isfinite(x)
+            or not 0 <= x <= 1
+            or not isinstance(y, (int, float))
+            or isinstance(y, bool)
+            or not math.isfinite(y)
+            or not 0 <= y <= 1
+        ):
+            continue
+        sanitized.append({
+            "id": pickup_id,
+            "resourceKey": resource_key,
+            "count": count,
+            "x": x,
+            "y": y,
+        })
+        if len(sanitized) >= MAX_SHARED_PLANET_PICKUPS:
+            break
+    return sanitized
+
+
+def sanitize_martian_enemy(enemy: object) -> dict | None:
+    if not isinstance(enemy, dict):
+        return None
+    enemy_id = enemy.get("id")
+    enemy_type = enemy.get("type")
+    x = enemy.get("x")
+    y = enemy.get("y")
+    hp = enemy.get("hp")
+    max_hp = enemy.get("maxHp")
+    ammo = enemy.get("ammo")
+    max_ammo = enemy.get("maxAmmo")
+    if (
+        not isinstance(enemy_id, str)
+        or not enemy_id
+        or len(enemy_id) > 160
+        or enemy_type not in ("martian", "lunatic")
+        or any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            for value in (x, y, hp, max_hp, ammo, max_ammo)
+        )
+        or not 0 <= x <= 1
+        or not 0 <= y <= 1
+        or not 0 <= hp <= 100_000
+        or not 1 <= max_hp <= 100_000
+        or not 0 <= ammo <= 10_000
+        or not 0 <= max_ammo <= 10_000
+    ):
+        return None
+    return {
+        "id": enemy_id,
+        "type": enemy_type,
+        "x": x,
+        "y": y,
+        "hp": hp,
+        "maxHp": max_hp,
+        "ammo": ammo,
+        "maxAmmo": max_ammo,
+        "facing": enemy.get("facing") if enemy.get("facing") in ("up", "down", "left", "right") else "down",
+        "animationFrame": enemy.get("animationFrame") if isinstance(enemy.get("animationFrame"), int) else 1,
+        "isMoving": enemy.get("isMoving") is True,
+        "shooting": enemy.get("shooting") is True,
+    }
+
+
+def public_world(world: dict, snapshot: dict | None = None, player_id: str = "") -> dict:
+    public = {key: value for key, value in world.items() if not key.startswith("_")}
+    pickups = sanitize_shared_pickups(world.get("pickups", []))
+    revision = world.get("_pickupRevision", 0)
+    if not isinstance(revision, int) or revision < 0:
+        revision = 0
+    public["pickupRevision"] = revision
+    center_x = snapshot.get("surfaceX", 0.5) if snapshot else 0.5
+    center_y = snapshot.get("surfaceY", 0.5) if snapshot else 0.5
+    if (
+        not isinstance(center_x, (int, float))
+        or isinstance(center_x, bool)
+        or not math.isfinite(center_x)
+    ):
+        center_x = 0.5
+    if (
+        not isinstance(center_y, (int, float))
+        or isinstance(center_y, bool)
+        or not math.isfinite(center_y)
+    ):
+        center_y = 0.5
+    center_x %= 1
+    center_y %= 1
+    is_nearby = lambda entity: (
+        min(abs(entity["x"] - center_x), 1 - abs(entity["x"] - center_x)) <= PICKUP_VISIBILITY_RADIUS
+        and min(abs(entity["y"] - center_y), 1 - abs(entity["y"] - center_y)) <= PICKUP_VISIBILITY_RADIUS
+    )
+    public["pickups"] = [pickup for pickup in pickups if is_nearby(pickup)]
+    enemies = world.get("_martianEnemies", {})
+    public["martianEnemies"] = [
+        {
+            **{
+                key: value for key, value in enemy.items()
+                if key not in ("_simulatorId", "_updatedAt")
+            },
+            "simulateHere": enemy.get("_simulatorId") == player_id or not (
+                PLAYERS.get(enemy.get("_simulatorId"), {}).get("snapshot", {}).get("scene") == "surface"
+                and str(PLAYERS.get(enemy.get("_simulatorId"), {}).get("snapshot", {}).get("planet", "")).lower()
+                == str(world.get("planet", "")).lower()
+            ),
+        }
+        for enemy in enemies.values()
+        if isinstance(enemies, dict) and isinstance(enemy, dict) and enemy.get("hp", 0) > 0 and is_nearby(enemy)
+    ][:MAX_SHARED_MARTIAN_ENEMIES] if isinstance(enemies, dict) else []
+    return public
 
 
 def is_server_admin(account: dict) -> bool:
@@ -675,26 +809,6 @@ def prune_stale_players(now: float) -> None:
                 str(player["snapshot"].get("name", player_id)),
             )
 
-    for world_key, owner_id in list(WORLD_OWNERS.items()):
-        owner = PLAYERS.get(owner_id)
-        owner_snapshot = owner["snapshot"] if owner else None
-        still_owns_world = (
-            owner_snapshot
-            and owner_snapshot.get("scene") == "surface"
-            and str(owner_snapshot.get("planet", "")).strip().lower() == world_key
-        )
-        if still_owns_world:
-            continue
-
-        replacement = next((
-            player_id for player_id, entry in PLAYERS.items()
-            if entry["snapshot"].get("scene") == "surface"
-            and str(entry["snapshot"].get("planet", "")).strip().lower() == world_key
-        ), None)
-        if replacement:
-            WORLD_OWNERS[world_key] = replacement
-        else:
-            WORLD_OWNERS.pop(world_key, None)
     refresh_space_owner()
 
 
@@ -804,14 +918,21 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
         now = time.time()
         with STATE_LOCK:
             prune_stale_players(now)
+            self_snapshot = PLAYERS.get(self_id, {}).get("snapshot")
             players = [
                 public_player_snapshot(entry["snapshot"]) for player_id, entry in PLAYERS.items()
                 if player_id != self_id
             ]
+            planet = (
+                str(self_snapshot.get("planet", "")).strip().lower()
+                if self_snapshot and self_snapshot.get("scene") == "surface"
+                else ""
+            )
             result = {
                 "players": players,
-                "worldOwners": dict(WORLD_OWNERS),
-                "worlds": {key: public_world(world) for key, world in WORLDS.items()},
+                "worlds": {
+                    planet: public_world(WORLDS[planet], self_snapshot, self_id)
+                } if planet in WORLDS else {},
                 "spaceWorld": public_space_world(),
                 "balance": public_balance(),
             }
@@ -976,12 +1097,6 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             planet = str(snapshot.get("planet", "")).strip().lower()
             if snapshot.get("scene") == "surface" and planet and isinstance(surface_world, dict):
                 existing_world = WORLDS.get(planet)
-                owner_id = WORLD_OWNERS.get(planet)
-                newly_assigned_owner = owner_id not in PLAYERS
-                if newly_assigned_owner:
-                    WORLD_OWNERS[planet] = player_id
-                    owner_id = player_id
-                is_world_owner = owner_id == player_id
                 previous_collected_ids = (
                     existing_world.get("_collectedPickupIds", []) if existing_world else []
                 )
@@ -998,38 +1113,142 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 ordered_collected_ids = list(dict.fromkeys(ordered_collected_ids))[-20_000:]
                 collected_ids = set(ordered_collected_ids)
 
-                if is_world_owner and (not newly_assigned_owner or existing_world is None):
-                    shared_world = {
-                        key: value for key, value in surface_world.items()
-                        if key != "collectedPickupIds"
-                    }
-                elif existing_world is not None:
-                    shared_world = dict(existing_world)
-                else:
-                    shared_world = {
-                        key: value for key, value in surface_world.items()
-                        if key != "collectedPickupIds"
-                    }
-
                 previous_world = WORLDS.get(planet)
+                shared_world = dict(existing_world or {})
+                shared_world.update({
+                    key: value for key, value in surface_world.items()
+                    if key not in ("pickups", "collectedPickupIds", "martianEnemies")
+                    and not key.startswith("_")
+                })
+                shared_world["planet"] = str(surface_world.get("planet", planet))
+                previous_pickups = sanitize_shared_pickups(shared_world.get("pickups", []))
+                previous_pickup_revision = (
+                    existing_world.get("_pickupRevision", 0)
+                    if existing_world and isinstance(existing_world.get("_pickupRevision", 0), int)
+                    else 0
+                )
+                incoming_pickups = surface_world.get("pickups")
+                merged_pickups = {pickup["id"]: pickup for pickup in previous_pickups}
+                if isinstance(incoming_pickups, list):
+                    for pickup in sanitize_shared_pickups(incoming_pickups):
+                        if pickup["id"] not in collected_ids:
+                            merged_pickups[pickup["id"]] = pickup
+                shared_world["pickups"] = [
+                    pickup for pickup_id, pickup in merged_pickups.items()
+                    if pickup_id not in collected_ids
+                ][-MAX_SHARED_PLANET_PICKUPS:]
+
                 shared_world["_collectedPickupIds"] = ordered_collected_ids
-                if isinstance(shared_world.get("pickups"), list):
-                    shared_world["pickups"] = [
-                        pickup for pickup in shared_world["pickups"]
-                        if isinstance(pickup, dict) and pickup.get("id") not in collected_ids
-                    ]
+                current_pickups = shared_world["pickups"]
+                shared_world["_pickupRevision"] = previous_pickup_revision + (current_pickups != previous_pickups)
+
+                dead_enemy_ids = shared_world.get("_deadMartianEnemyIds", [])
+                if not isinstance(dead_enemy_ids, list):
+                    dead_enemy_ids = []
+                dead_enemy_ids = list(dict.fromkeys(
+                    enemy_id for enemy_id in dead_enemy_ids
+                    if isinstance(enemy_id, str)
+                ))[-5000:]
+                dead_enemy_set = set(dead_enemy_ids)
+
+                enemy_states = shared_world.get("_martianEnemies", {})
+                if not isinstance(enemy_states, dict):
+                    enemy_states = {}
+                if not enemy_states and isinstance(shared_world.get("martianEnemies"), list):
+                    for legacy_enemy in shared_world["martianEnemies"]:
+                        clean_enemy = sanitize_martian_enemy(legacy_enemy)
+                        if clean_enemy:
+                            enemy_states[clean_enemy["id"]] = {
+                                **clean_enemy,
+                                "_simulatorId": "",
+                                "_updatedAt": now,
+                            }
+                incoming_deaths = surface_world.get("deadMartianEnemyIds", [])
+                if isinstance(incoming_deaths, list):
+                    for enemy_id in incoming_deaths[:128]:
+                        if not isinstance(enemy_id, str) or len(enemy_id) > 160:
+                            continue
+                        enemy_states.pop(enemy_id, None)
+                        if enemy_id not in dead_enemy_set:
+                            dead_enemy_ids.append(enemy_id)
+                            dead_enemy_set.add(enemy_id)
+                incoming_enemies = surface_world.get("martianEnemies")
+                if isinstance(incoming_enemies, list):
+                    sanitized_enemies = []
+                    for raw_enemy in incoming_enemies[:MAX_SHARED_MARTIAN_ENEMIES]:
+                        clean_enemy = sanitize_martian_enemy(raw_enemy)
+                        if clean_enemy:
+                            sanitized_enemies.append(clean_enemy)
+                    incoming_enemy_ids = {enemy["id"] for enemy in sanitized_enemies}
+                    for enemy in sanitized_enemies:
+                        enemy_id = enemy["id"]
+                        if enemy_id in dead_enemy_set:
+                            continue
+                        previous_enemy = enemy_states.get(enemy_id)
+                        if not isinstance(previous_enemy, dict):
+                            if enemy["hp"] > 0:
+                                enemy_states[enemy_id] = {
+                                    **enemy,
+                                    "_simulatorId": player_id,
+                                    "_updatedAt": now,
+                                }
+                            continue
+
+                        previous_simulator_id = previous_enemy.get("_simulatorId", "")
+                        previous_simulator = PLAYERS.get(previous_simulator_id)
+                        previous_simulator_snapshot = previous_simulator.get("snapshot", {}) if previous_simulator else {}
+                        simulator_is_here = (
+                            previous_simulator_snapshot.get("scene") == "surface"
+                            and str(previous_simulator_snapshot.get("planet", "")).strip().lower() == planet
+                        )
+                        if previous_simulator_id == player_id or not simulator_is_here:
+                            enemy_states[enemy_id] = {
+                                **enemy,
+                                "hp": min(previous_enemy.get("hp", enemy["hp"]), enemy["hp"]),
+                                "_simulatorId": player_id,
+                                "_updatedAt": now,
+                            }
+                        else:
+                            previous_enemy["hp"] = min(previous_enemy.get("hp", enemy["hp"]), enemy["hp"])
+                            previous_enemy["_updatedAt"] = now
+                        if enemy_states.get(enemy_id, {}).get("hp", 0) <= 0:
+                            enemy_states.pop(enemy_id, None)
+                            dead_enemy_ids.append(enemy_id)
+                            dead_enemy_set.add(enemy_id)
+
+                    for enemy_id, enemy in list(enemy_states.items()):
+                        if enemy.get("_simulatorId") == player_id and enemy_id not in incoming_enemy_ids:
+                            enemy_states.pop(enemy_id, None)
+                            dead_enemy_ids.append(enemy_id)
+                            dead_enemy_set.add(enemy_id)
+
+                for enemy_id, enemy in list(enemy_states.items()):
+                    if now - enemy.get("_updatedAt", now) > PLAYER_TTL_SECONDS:
+                        enemy_states.pop(enemy_id, None)
+                shared_world["_martianEnemies"] = dict(
+                    sorted(
+                        enemy_states.items(),
+                        key=lambda item: item[1].get("_updatedAt", 0),
+                        reverse=True,
+                    )[:MAX_SHARED_MARTIAN_ENEMIES]
+                )
+                shared_world["_deadMartianEnemyIds"] = list(dict.fromkeys(dead_enemy_ids))[-5000:]
+                shared_world["martianEnemies"] = [
+                    {key: value for key, value in enemy.items() if not key.startswith("_")}
+                    for enemy in shared_world["_martianEnemies"].values()
+                ]
+
                 if shared_world != previous_world:
                     WORLDS[planet] = shared_world
                     WORLDS_DIRTY = True
                 save_shared_worlds(now)
 
             visible_worlds = {
-                planet: public_world(WORLDS[planet])
+                planet: public_world(WORLDS[planet], snapshot, player_id)
             } if planet in WORLDS else {}
             result = {
                 "ok": True,
                 "players": [public_player_snapshot(entry["snapshot"]) for peer_id, entry in PLAYERS.items() if peer_id != player_id],
-                "worldOwners": dict(WORLD_OWNERS),
                 "worlds": visible_worlds,
                 "spaceWorld": public_space_world(),
                 "spaceHitResults": space_hit_results,

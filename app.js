@@ -141,13 +141,15 @@ let authReady = !/^https?:$/.test(location.protocol);
 let authMode = 'login';
 let multiplayerChatMessage = '';
 let multiplayerChatMessageUntil = 0;
-let multiplayerWorldOwnerId = '';
-let multiplayerWorldOwnerPlanetKey = '';
-let multiplayerIsWorldOwner = false;
-let multiplayerWorldNeedsAuthoritySync = false;
 let multiplayerWorlds = {};
 let multiplayerWorldRevision = 0;
 let multiplayerAppliedWorldRevision = -1;
+let multiplayerLastPickupSource = null;
+let multiplayerLastPickupPlanetKey = '';
+const MULTIPLAYER_PICKUP_SYNC = Symbol('multiplayerPickupSync');
+const PLANET_PICKUP_REGION_CHUNKS = 10;
+const PLANET_PICKUP_REGION_RADIUS_CHUNKS = 8;
+const MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS = 8;
 let multiplayerSpaceOwnerId = '';
 let multiplayerIsSpaceOwner = false;
 let multiplayerEarthWandererTarget = null;
@@ -156,6 +158,7 @@ let multiplayerMartianEnemyTargets = null;
 let multiplayerProjectileSequence = 0;
 const multiplayerCombatEvents = [];
 const multiplayerSpaceEnemyHitEvents = [];
+const multiplayerMartianEnemyDeathEvents = [];
 const processedMultiplayerCombatEvents = new Map();
 const processedMultiplayerSpaceHitResults = new Set();
 const multiplayerSyncedSurfaceEntities = new Set();
@@ -228,7 +231,9 @@ const MAX_ITEM_STACK = 32;
 const SOLAR_PANEL_MAX_ENERGY = 3 * MAX_ITEM_STACK;
 const BASE_INVENTORY_STACK_CAPACITY = 20;
 const HOMEWORLD_PICKUP_CAPACITY = 5;
-const PLANET_PICKUP_CAPACITY = 7500;
+const PLANET_PICKUP_CAPACITY = 500;
+const PLANET_PICKUP_BATCH_SIZE = 80;
+const MULTIPLAYER_PICKUP_HISTORY_LIMIT = 1000;
 const PLANET_PICKUP_REGEN_INTERVAL = 60 * 1000;
 const MERCHANT_RESTOCK_INTERVAL = 5 * 60 * 1000;
 const RESOURCE_SELL_PRICES = {
@@ -938,15 +943,22 @@ function sendChatMessage(text) {
 
 function getMultiplayerSnapshot() {
   const onSurface = game.scene === 'surface' && game.surface;
+  const surfacePlanetKey = onSurface ? game.surface.planet.name.toLowerCase() : '';
+  const includeSurfacePickups = Boolean(onSurface && (
+    multiplayerLastPickupPlanetKey !== surfacePlanetKey ||
+    multiplayerLastPickupSource !== game.surface.pickups
+  ));
   const surfaceWorld = onSurface ? {
     planet: game.surface.planet.name,
-    pickups: game.surface.pickups.map((pickup) => ({
-      id: pickup.id,
-      resourceKey: pickup.resourceKey,
-      count: pickup.count,
-      x: pickup.x / SURFACE_WORLD_SIZE,
-      y: pickup.y / SURFACE_WORLD_SIZE,
-    })),
+    ...(includeSurfacePickups ? {
+      pickups: game.surface.pickups.map((pickup) => ({
+        id: pickup.id,
+        resourceKey: pickup.resourceKey,
+        count: pickup.count,
+        x: pickup.x / SURFACE_WORLD_SIZE,
+        y: pickup.y / SURFACE_WORLD_SIZE,
+      })),
+    } : {}),
     earthWanderer: isHomeworld(game.surface.planet) && game.earthWanderer ? {
       x: game.earthWanderer.x / SURFACE_WORLD_SIZE,
       y: game.earthWanderer.y / SURFACE_WORLD_SIZE,
@@ -980,9 +992,10 @@ function getMultiplayerSnapshot() {
         shooting: game.time < enemy.shotUntil,
       }))
       : null,
+    deadMartianEnemyIds: multiplayerMartianEnemyDeathEvents.slice(-128),
     collectedPickupIds: [...game.player.collectedPickupIds]
       .filter((id) => id.startsWith(`${getPlanetResourceStateKey(game.surface.planet)}:`))
-      .slice(-5000),
+      .slice(-MULTIPLAYER_PICKUP_HISTORY_LIMIT),
   } : null;
   // Estado visual del jugador en superficie (hoverboard, pose de inventario, armas) para que los demás lo vean.
   const knifeSwinging = Boolean(
@@ -1064,7 +1077,7 @@ function getMultiplayerSnapshot() {
       };
     }),
   } : null;
-  return {
+  const snapshot = {
     id: multiplayerPlayerId,
     name: multiplayerName,
     scene: game.scene,
@@ -1087,10 +1100,17 @@ function getMultiplayerSnapshot() {
     spaceWorld,
     spaceHitEvents: multiplayerSpaceEnemyHitEvents,
     surfaceWorld,
-    collectedPickupIds: [...game.player.collectedPickupIds].slice(-5000),
+    collectedPickupIds: [...game.player.collectedPickupIds].slice(-MULTIPLAYER_PICKUP_HISTORY_LIMIT),
     chat: Date.now() < multiplayerChatMessageUntil ? multiplayerChatMessage : '',
     sentAt: Date.now(),
   };
+  if (includeSurfacePickups) {
+    snapshot[MULTIPLAYER_PICKUP_SYNC] = {
+      source: game.surface.pickups,
+      planetKey: surfacePlanetKey,
+    };
+  }
+  return snapshot;
 }
 
 function reportMultiplayerHit(target, scene, damage, x, y, extra = {}) {
@@ -1479,22 +1499,24 @@ async function syncMultiplayer(force = false) {
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const responseState = await response.json();
+    const pickupSync = snapshot[MULTIPLAYER_PICKUP_SYNC];
+    if (pickupSync) {
+      multiplayerLastPickupSource = pickupSync.source;
+      multiplayerLastPickupPlanetKey = pickupSync.planetKey;
+    }
+    if (snapshot.surfaceWorld?.deadMartianEnemyIds?.length) {
+      const submittedDeaths = new Set(snapshot.surfaceWorld.deadMartianEnemyIds);
+      for (let index = multiplayerMartianEnemyDeathEvents.length - 1; index >= 0; index -= 1) {
+        if (submittedDeaths.has(multiplayerMartianEnemyDeathEvents[index])) {
+          multiplayerMartianEnemyDeathEvents.splice(index, 1);
+        }
+      }
+    }
     applyBalanceSettings(responseState.balance);
     const peers = Array.isArray(responseState) ? responseState : responseState.players;
     const activeWorldKey = game.scene === 'surface' && game.surface
       ? game.surface.planet.name.toLowerCase()
       : '';
-    const previousWorldOwnerId = multiplayerWorldOwnerId;
-    const previousWorldOwnerPlanetKey = multiplayerWorldOwnerPlanetKey;
-    multiplayerWorldOwnerId = Array.isArray(responseState)
-      ? ''
-      : responseState.worldOwners?.[activeWorldKey] || '';
-    multiplayerWorldOwnerPlanetKey = activeWorldKey;
-    multiplayerIsWorldOwner = multiplayerWorldOwnerId === multiplayerPlayerId;
-    multiplayerWorldNeedsAuthoritySync = multiplayerIsWorldOwner && (
-      previousWorldOwnerId !== multiplayerPlayerId ||
-      previousWorldOwnerPlanetKey !== activeWorldKey
-    );
     multiplayerWorlds = Array.isArray(responseState) ? {} : (responseState.worlds || {});
     multiplayerWorldRevision += 1;
     const previousPlayers = new Map(multiplayerPlayers.map((player) => [player.id, player]));
@@ -1569,10 +1591,18 @@ function applySharedSurfaceWorld(dt, blend) {
   const worldKey = game.surface.planet.name.toLowerCase();
   const world = multiplayerWorlds[worldKey];
   if (!world) return;
-  const synchronizeNewOwner = multiplayerIsWorldOwner && multiplayerWorldNeedsAuthoritySync;
-
   if (multiplayerAppliedWorldRevision !== multiplayerWorldRevision) {
-    game.surface.pickups = world.pickups
+    multiplayerEarthWandererTarget = world.earthWanderer || null;
+    multiplayerMartianTargets = Array.isArray(world.martianNpcs) ? world.martianNpcs : null;
+    multiplayerMartianEnemyTargets = Array.isArray(world.martianEnemies) ? world.martianEnemies : null;
+    multiplayerAppliedWorldRevision = multiplayerWorldRevision;
+  }
+
+  const shouldApplyPickups = Array.isArray(world.pickups);
+  if (shouldApplyPickups) {
+    const collected = game.player.collectedPickupIds;
+    const nextPickups = world.pickups
+      .filter((pickup) => !collected.has(pickup.id))
       .map((pickup) => {
         const resource = RESOURCE_CATALOG[pickup.resourceKey];
         if (!resource) return null;
@@ -1588,16 +1618,22 @@ function applySharedSurfaceWorld(dt, blend) {
         };
       })
       .filter(Boolean);
-    multiplayerEarthWandererTarget = world.earthWanderer || null;
-    multiplayerMartianTargets = Array.isArray(world.martianNpcs) ? world.martianNpcs : null;
-    multiplayerMartianEnemyTargets = Array.isArray(world.martianEnemies) ? world.martianEnemies : null;
-    multiplayerAppliedWorldRevision = multiplayerWorldRevision;
+    const unchanged = game.surface.pickups.length === nextPickups.length &&
+      nextPickups.every((pickup, index) => {
+        const current = game.surface.pickups[index];
+        return current.id === pickup.id &&
+          current.resourceKey === pickup.resourceKey &&
+          current.count === pickup.count &&
+          Math.abs(current.x - pickup.x) < 1e-6 &&
+          Math.abs(current.y - pickup.y) < 1e-6;
+      });
+    if (!unchanged) game.surface.pickups = nextPickups;
   }
 
-  if ((!multiplayerIsWorldOwner || synchronizeNewOwner) && isHomeworld(game.surface.planet) && !multiplayerEarthWandererTarget) {
+  if (isHomeworld(game.surface.planet) && !multiplayerEarthWandererTarget) {
     game.earthWanderer = null;
   }
-  if ((!multiplayerIsWorldOwner || synchronizeNewOwner) && isHomeworld(game.surface.planet) && multiplayerEarthWandererTarget) {
+  if (isHomeworld(game.surface.planet) && multiplayerEarthWandererTarget) {
     const target = multiplayerEarthWandererTarget;
     const npc = game.earthWanderer || (game.earthWanderer = {
       x: target.x * SURFACE_WORLD_SIZE,
@@ -1630,7 +1666,7 @@ function applySharedSurfaceWorld(dt, blend) {
     npc.greetingPhase = target.greetingPhase;
   }
 
-  if ((!multiplayerIsWorldOwner || synchronizeNewOwner) && isMars(game.surface.planet) && multiplayerMartianTargets) {
+  if (isMars(game.surface.planet) && multiplayerMartianTargets) {
     if (!Array.isArray(game.martianNpcs) || game.martianNpcs.length !== multiplayerMartianTargets.length) {
       game.martianNpcs = multiplayerMartianTargets.map((npc, index) => ({
         id: index,
@@ -1660,10 +1696,10 @@ function applySharedSurfaceWorld(dt, blend) {
     });
   }
 
-  if ((!multiplayerIsWorldOwner || synchronizeNewOwner) && (isMars(game.surface.planet) || isLuna(game.surface.planet))) {
+  if (isMars(game.surface.planet) || isLuna(game.surface.planet)) {
     const targets = multiplayerMartianEnemyTargets ?? [];
     const currentEnemies = new Map(game.martianEnemies.map((enemy) => [enemy.id, enemy]));
-    game.martianEnemies = targets.map((target) => {
+    game.martianEnemies = targets.filter((target) => target.hp > 0).map((target) => {
       const enemy = currentEnemies.get(target.id) ?? {
         id: target.id,
         type: target.type,
@@ -1680,10 +1716,11 @@ function applySharedSurfaceWorld(dt, blend) {
         animationFrame: target.animationFrame,
         shotUntil: 0,
       };
+      enemy.multiplayerSimulatedHere = target.simulateHere === true;
       enemy.type = target.type;
       enemy.planetName = game.surface.planet.name;
       enemy.runSpeedMultiplier = target.type === 'lunatic' ? 2 : 1;
-      enemy.hp = target.hp;
+      enemy.hp = Math.min(enemy.hp, target.hp);
       enemy.maxHp = target.maxHp;
       enemy.ammo = target.ammo;
       enemy.maxAmmo = target.maxAmmo;
@@ -1704,7 +1741,6 @@ function applySharedSurfaceWorld(dt, blend) {
       );
     }
   }
-  if (synchronizeNewOwner) multiplayerWorldNeedsAuthoritySync = false;
 }
 
 chatComposer.addEventListener('submit', (event) => {
@@ -2067,35 +2103,35 @@ function canSpawnMartianEnemyAt(x, y) {
 }
 
 function findMartianEnemySpawnPoint(distanceTiles = null, requireMountain = true, preferredDirection = null) {
-  const attempts = 240;
   const preferredAngle = preferredDirection && (preferredDirection.x || preferredDirection.y)
     ? Math.atan2(preferredDirection.y, preferredDirection.x)
     : null;
-  for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const angle = preferredAngle === null
-      ? (attempt + Math.random()) / attempts * Math.PI * 2
-      : preferredAngle + (((attempt + Math.random()) / attempts) - 0.5) * Math.PI * 0.55;
-    // Mantener los spawns dentro del radio donde el jugador puede detectarlos.
-    const maxSpawnDistanceTiles = Math.floor(CHUNK_SIZE * 2 / SURFACE_TILE);
-    const distance = SURFACE_TILE * (distanceTiles ?? (
-      25 + Math.random() * Math.max(1, maxSpawnDistanceTiles - 25)
-    ));
-    const point = snapSurfacePoint(
-      game.surface.x + Math.cos(angle) * distance,
-      game.surface.y + Math.sin(angle) * distance
-    );
-    if (!canSpawnMartianEnemyAt(point.x, point.y)) continue;
-    if (requireMountain && distanceTiles === null && !hasMountainBesideMarsTile(point.x, point.y)) continue;
-    return point;
+  const searchPhases = [];
+  if (preferredAngle !== null && distanceTiles === null) {
+    searchPhases.push({ preferred: true, mountain: requireMountain });
   }
-  if (distanceTiles !== null) {
+  searchPhases.push({ preferred: false, mountain: requireMountain && distanceTiles === null });
+  if (requireMountain && distanceTiles === null) {
+    searchPhases.push({ preferred: false, mountain: false });
+  }
+
+  for (const phase of searchPhases) {
+    const attempts = phase.preferred ? 100 : 160;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
-      const angle = attempt / attempts * Math.PI * 2;
+      const angle = phase.preferred
+        ? preferredAngle + (((attempt + Math.random()) / attempts) - 0.5) * Math.PI * 0.55
+        : (attempt + Math.random()) / attempts * Math.PI * 2;
+      const maxSpawnDistanceTiles = Math.floor(CHUNK_SIZE * MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS / SURFACE_TILE);
+      const distance = distanceTiles === null
+        ? SURFACE_TILE * (25 + Math.random() * Math.max(1, maxSpawnDistanceTiles - 25))
+        : SURFACE_TILE * distanceTiles;
       const point = snapSurfacePoint(
-        game.surface.x + Math.cos(angle) * SURFACE_TILE * distanceTiles,
-        game.surface.y + Math.sin(angle) * SURFACE_TILE * distanceTiles
+        game.surface.x + Math.cos(angle) * distance,
+        game.surface.y + Math.sin(angle) * distance
       );
-      if (canSpawnMartianEnemyAt(point.x, point.y)) return point;
+      if (!canSpawnMartianEnemyAt(point.x, point.y)) continue;
+      if (phase.mountain && !hasMountainBesideMarsTile(point.x, point.y)) continue;
+      return point;
     }
   }
   return null;
@@ -2107,9 +2143,10 @@ function spawnMartianEnemy(distanceTiles = null, type = 'martian', preferredDire
   const point = findMartianEnemySpawnPoint(distanceTiles, !lunatic, preferredDirection);
   if (!point) return null;
   const enemy = {
-    id: game.martianEnemySequence++,
+    id: `${multiplayerPlayerId}:${globalThis.crypto?.randomUUID?.() ?? game.martianEnemySequence++}`,
     type,
     planetName: game.surface.planet.name,
+    multiplayerSimulatedHere: true,
     runSpeedMultiplier: lunatic ? 2 : 1,
     x: point.x,
     y: point.y,
@@ -2265,6 +2302,9 @@ function damageMartianEnemy(enemy, damage) {
   game.player.damageHudUntil = game.time + 5;
   if (enemy.hp <= 0) {
     game.martianEnemies.splice(game.martianEnemies.indexOf(enemy), 1);
+    if (multiplayerReady && !multiplayerMartianEnemyDeathEvents.includes(enemy.id)) {
+      multiplayerMartianEnemyDeathEvents.push(enemy.id);
+    }
     const missionProgressText = handleSurfaceEnemyMissionKill(enemy);
     const lootSummary = [];
     for (const [resourceKey, count] of Object.entries(enemy.loot ?? {})) {
@@ -2591,7 +2631,7 @@ function updateMartianEnemy(enemy, dt) {
 function updateMartianEnemies(dt) {
   if (game.scene !== 'surface' || !game.surface || !(isMars(game.surface.planet) || isLuna(game.surface.planet))) return;
   const currentType = isLuna(game.surface.planet) ? 'lunatic' : 'martian';
-  const activeRadius = CHUNK_SIZE * 6;
+  const activeRadius = CHUNK_SIZE * MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS;
   const desiredEnemyCount = currentType === 'lunatic' ? 6 : 4;
   const facingDirections = {
     up: { x: 0, y: -1 }, down: { x: 0, y: 1 },
@@ -2615,8 +2655,14 @@ function updateMartianEnemies(dt) {
       (enemy.type ?? 'martian') === currentType &&
       getSurfaceDistance(enemy.x, enemy.y, game.surface.x, game.surface.y) <= activeRadius
     ).length;
-    if (nearbyEnemyCount < desiredEnemyCount) spawnMartianEnemy(null, currentType, preferredDirection);
-    game.martianEnemySpawnTimer = 0.75 + Math.random() * 0.5;
+    if (nearbyEnemyCount < desiredEnemyCount) {
+      const enemy = spawnMartianEnemy(null, currentType, preferredDirection);
+      game.martianEnemySpawnTimer = enemy
+        ? 1.5 + Math.random()
+        : 0.35 + Math.random() * 0.35;
+    } else {
+      game.martianEnemySpawnTimer = 1.5 + Math.random();
+    }
   }
   for (let index = game.martianEnemies.length - 1; index >= 0; index -= 1) {
     const enemy = game.martianEnemies[index];
@@ -2625,7 +2671,7 @@ function updateMartianEnemies(dt) {
       game.martianEnemies.splice(index, 1);
       continue;
     }
-    updateMartianEnemy(enemy, dt);
+    if (!multiplayerReady || enemy.multiplayerSimulatedHere) updateMartianEnemy(enemy, dt);
   }
 }
 
@@ -6719,30 +6765,55 @@ function getPlanetPickupCapacity(planet) {
   return isHomeworld(planet) ? HOMEWORLD_PICKUP_CAPACITY : PLANET_PICKUP_CAPACITY;
 }
 
-function generatePlanetPickupBatch(planet, count, generation, existingPickups = [], avoidCameraCenter = null) {
+function getPlanetPickupRegion(planet, center = null) {
+  const point = center ?? (
+    game.surface?.planet?.name === planet.name
+      ? { x: game.surface.x, y: game.surface.y }
+      : { x: SURFACE_WORLD_SIZE * 0.58125, y: SURFACE_WORLD_SIZE * 0.6 }
+  );
+  const regionSize = CHUNK_SIZE * PLANET_PICKUP_REGION_CHUNKS;
+  const chunkX = wrapCell(Math.floor(wrapSurfaceCoordinate(point.x) / regionSize), SURFACE_CHUNK_COUNT / PLANET_PICKUP_REGION_CHUNKS);
+  const chunkY = wrapCell(Math.floor(wrapSurfaceCoordinate(point.y) / regionSize), SURFACE_CHUNK_COUNT / PLANET_PICKUP_REGION_CHUNKS);
+  return {
+    key: `${chunkX},${chunkY}`,
+    chunkX,
+    chunkY,
+    center: {
+      x: (chunkX + 0.5) * regionSize,
+      y: (chunkY + 0.5) * regionSize,
+    },
+  };
+}
+
+function generatePlanetPickupBatch(
+  planet,
+  count,
+  generation,
+  avoidCameraCenter = null,
+  region = null
+) {
+  const spawnRegion = region ?? getPlanetPickupRegion(planet, avoidCameraCenter);
   const random = createRandom(coordinateSeed(
-    planet.seed ^ generation,
-    planet.star.chunkX,
+    planet.seed ^ generation ^ spawnRegion.chunkX,
+    planet.star.chunkX ^ spawnRegion.chunkY,
     planet.star.chunkY ^ 0x51f15e
   ));
   const positions = [];
-  const normalizedDistance = (first, second) =>
-    getSurfaceDistance(
-      first.x * SURFACE_WORLD_SIZE,
-      first.y * SURFACE_WORLD_SIZE,
-      second.x * SURFACE_WORLD_SIZE,
-      second.y * SURFACE_WORLD_SIZE
-    ) / SURFACE_WORLD_SIZE;
-
   const cameraMargin = SURFACE_TILE * 2;
   const halfViewWidth = game.width / Math.max(0.1, playerZoom) / 2 + cameraMargin;
   const halfViewHeight = game.height / Math.max(0.1, playerZoom) / 2 + cameraMargin;
   const homeLand = isHomeworld(planet) ? getHomeLandBounds() : null;
   for (let attempt = 0; positions.length < count && attempt < count * 30; attempt += 1) {
-    const point = snapSurfacePoint(
-      homeLand ? homeLand.x + random() * homeLand.width : random() * SURFACE_WORLD_SIZE,
-      homeLand ? homeLand.y + random() * homeLand.height : random() * SURFACE_WORLD_SIZE,
-    );
+    const angle = random() * Math.PI * 2;
+    const minDistance = CHUNK_SIZE * 1.5;
+    const maxDistance = CHUNK_SIZE * PLANET_PICKUP_REGION_RADIUS_CHUNKS;
+    const distance = Math.sqrt(minDistance ** 2 + random() * (maxDistance ** 2 - minDistance ** 2));
+    const point = snapSurfacePoint(homeLand
+      ? homeLand.x + random() * homeLand.width
+      : spawnRegion.center.x + Math.cos(angle) * distance,
+    homeLand
+      ? homeLand.y + random() * homeLand.height
+      : spawnRegion.center.y + Math.sin(angle) * distance);
     const position = { x: point.x / SURFACE_WORLD_SIZE, y: point.y / SURFACE_WORLD_SIZE };
     const relativeX = avoidCameraCenter
       ? Math.abs(getSurfaceAxisDelta(point.x, avoidCameraCenter.x))
@@ -6752,8 +6823,7 @@ function generatePlanetPickupBatch(planet, count, generation, existingPickups = 
       : Infinity;
     if (
       (relativeX <= halfViewWidth && relativeY <= halfViewHeight) ||
-      (isHomeworld(planet) && isNearHomeFloor(point.x, point.y)) ||
-      existingPickups.some((pickup) => normalizedDistance(position, pickup) < SURFACE_TILE / SURFACE_WORLD_SIZE)
+      (isHomeworld(planet) && isNearHomeFloor(point.x, point.y))
     ) continue;
     positions.push(position);
   }
@@ -6768,7 +6838,7 @@ function generatePlanetPickupBatch(planet, count, generation, existingPickups = 
     const resourceKey = availableResources[index % availableResources.length];
     const item = RESOURCE_CATALOG[resourceKey];
     return {
-      id: `${getPlanetResourceStateKey(planet)}:${generation}:${index}`,
+      id: `${getPlanetResourceStateKey(planet)}:${spawnRegion.key}:${generation}:${index}`,
       resourceKey,
       name: item.name,
       icon: item.icon,
@@ -6779,37 +6849,69 @@ function generatePlanetPickupBatch(planet, count, generation, existingPickups = 
   });
 }
 
-function getPlanetResourceState(planet, now = Date.now()) {
+function getPlanetResourceState(planet, now = Date.now(), spawnCenter = null) {
   const key = getPlanetResourceStateKey(planet);
+  const region = getPlanetPickupRegion(planet, spawnCenter);
   let state = game.player.planetResourceStates[key];
   if (!state || !Array.isArray(state.pickups)) {
     state = {
       pickups: [],
       generation: 0,
       lastRegeneratedAt: now,
-      resourceCatalogVersion: 6,
+      resourceCatalogVersion: 7,
       regolithGenerationVersion: planet.isMoon ? 1 : 0,
+      pickupRegionKey: region.key,
     };
     game.player.planetResourceStates[key] = state;
     state.pickups = generatePlanetPickupBatch(
       planet,
-      getPlanetPickupCapacity(planet),
-      state.generation
+      isHomeworld(planet) ? HOMEWORLD_PICKUP_CAPACITY : PLANET_PICKUP_BATCH_SIZE,
+      state.generation,
+      spawnCenter ?? region.center,
+      region
     );
     return state;
   }
 
   if (!Number.isFinite(state.generation)) state.generation = 0;
   if (!Number.isFinite(state.lastRegeneratedAt)) state.lastRegeneratedAt = now;
-  if (state.resourceCatalogVersion !== 6) {
+  if (state.resourceCatalogVersion !== 7) {
     state.generation += 1;
     state.pickups = generatePlanetPickupBatch(
       planet,
-      getPlanetPickupCapacity(planet),
-      state.generation
+      isHomeworld(planet) ? HOMEWORLD_PICKUP_CAPACITY : PLANET_PICKUP_BATCH_SIZE,
+      state.generation,
+      spawnCenter ?? region.center,
+      region
     );
-    state.resourceCatalogVersion = 6;
+    state.resourceCatalogVersion = 7;
+    state.pickupRegionKey = region.key;
     if (planet.isMoon) state.regolithGenerationVersion = 1;
+  }
+  if (!isHomeworld(planet) && state.pickupRegionKey !== region.key) {
+    const regionCenter = region.center;
+    const visibleRadius = CHUNK_SIZE * PLANET_PICKUP_REGION_RADIUS_CHUNKS;
+    state.pickups = state.pickups.filter((pickup) =>
+      getSurfaceDistance(
+        pickup.x * SURFACE_WORLD_SIZE,
+        pickup.y * SURFACE_WORLD_SIZE,
+        regionCenter.x,
+        regionCenter.y
+      ) <= visibleRadius
+    );
+    if (state.pickups.length + PLANET_PICKUP_BATCH_SIZE > PLANET_PICKUP_CAPACITY) {
+      state.pickups = state.pickups.slice(-(PLANET_PICKUP_CAPACITY - PLANET_PICKUP_BATCH_SIZE));
+    }
+    state.generation += 1;
+    state.pickups.push(...generatePlanetPickupBatch(
+      planet,
+      PLANET_PICKUP_BATCH_SIZE,
+      state.generation,
+      spawnCenter ?? region.center,
+      region
+    ));
+    state.pickupRegionKey = region.key;
+    state.lastRegeneratedAt = now;
   }
   if (planet.isMoon && state.regolithGenerationVersion !== 1) {
     for (const pickup of state.pickups) {
@@ -6827,45 +6929,65 @@ function getPlanetResourceState(planet, now = Date.now()) {
   return state;
 }
 
-function replenishPlanetPickups(planet, now = Date.now()) {
-  const state = getPlanetResourceState(planet, now);
+function replenishPlanetPickups(planet, now = Date.now(), center = null) {
+  const spawnCenter = center ?? (game.scene === 'surface' && game.surface?.planet?.name === planet.name
+    ? { x: game.surface.x, y: game.surface.y }
+    : null);
+  const region = getPlanetPickupRegion(planet, spawnCenter);
+  const regionChanged = !isHomeworld(planet) &&
+    game.player.planetResourceStates[getPlanetResourceStateKey(planet)]?.pickupRegionKey !== region.key;
+  const state = getPlanetResourceState(planet, now, spawnCenter);
   if (now - state.lastRegeneratedAt < PLANET_PICKUP_REGEN_INTERVAL) {
-    return false;
+    return regionChanged;
   }
 
   const intervalsElapsed = Math.floor(
     (now - state.lastRegeneratedAt) / PLANET_PICKUP_REGEN_INTERVAL
   );
   state.lastRegeneratedAt += intervalsElapsed * PLANET_PICKUP_REGEN_INTERVAL;
-  const missingCount = Math.max(
-    0,
+  const missingCount = Math.max(0, Math.min(
+    PLANET_PICKUP_BATCH_SIZE,
     getPlanetPickupCapacity(planet) - state.pickups.length
-  );
+  ));
   if (missingCount > 0) {
     state.generation += 1;
-    const avoidCameraCenter = game.scene === 'surface' && game.surface?.planet?.name === planet.name
-      ? { x: game.surface.x, y: game.surface.y }
-      : null;
+    const pickupRegion = getPlanetPickupRegion(planet, spawnCenter);
     state.pickups.push(...generatePlanetPickupBatch(
       planet,
       missingCount,
       state.generation,
-      state.pickups,
-      avoidCameraCenter
+      spawnCenter ?? pickupRegion.center,
+      pickupRegion
     ));
   }
-  return missingCount > 0;
+  return regionChanged || missingCount > 0;
 }
 
-function createPlanetPickups(planet) {
-  replenishPlanetPickups(planet);
-  const state = getPlanetResourceState(planet);
+function createPlanetPickups(planet, center = null) {
+  const spawnCenter = center ?? (
+    game.surface?.planet?.name === planet.name
+      ? { x: game.surface.x, y: game.surface.y }
+      : null
+  );
+  if (center) {
+    getPlanetResourceState(planet, Date.now(), center);
+  }
+  replenishPlanetPickups(planet, Date.now(), spawnCenter);
+  const state = getPlanetResourceState(planet, Date.now(), spawnCenter);
   if (isHomeworld(planet)) {
     state.pickups = state.pickups.filter((pickup) =>
       !isNearHomeFloor(pickup.x * SURFACE_WORLD_SIZE, pickup.y * SURFACE_WORLD_SIZE)
     );
   }
-  return state.pickups.map((pickup) => ({
+  const nearbyPickups = isHomeworld(planet) ? state.pickups : state.pickups.filter((pickup) =>
+    getSurfaceDistance(
+      pickup.x * SURFACE_WORLD_SIZE,
+      pickup.y * SURFACE_WORLD_SIZE,
+      spawnCenter?.x ?? SURFACE_WORLD_SIZE * 0.58125,
+      spawnCenter?.y ?? SURFACE_WORLD_SIZE * 0.6
+    ) <= CHUNK_SIZE * (PLANET_PICKUP_REGION_RADIUS_CHUNKS + PLANET_PICKUP_REGION_CHUNKS)
+  );
+  return nearbyPickups.map((pickup) => ({
     ...pickup,
     ...snapSurfacePoint(pickup.x * SURFACE_WORLD_SIZE, pickup.y * SURFACE_WORLD_SIZE),
   }));
@@ -6901,7 +7023,8 @@ function restorePlanetResourceStates(savedStates) {
     }));
     game.player.planetResourceStates[key] = {
       pickups,
-      ...(savedState.resourceCatalogVersion === 6 ? { resourceCatalogVersion: 6 } : {}),
+      ...(savedState.resourceCatalogVersion === 7 ? { resourceCatalogVersion: 7 } : {}),
+      ...(typeof savedState.pickupRegionKey === 'string' ? { pickupRegionKey: savedState.pickupRegionKey } : {}),
       regolithGenerationVersion: savedState.regolithGenerationVersion === 1 ? 1 : 0,
       generation: Number.isInteger(savedState.generation) && savedState.generation >= 0
         ? savedState.generation
@@ -6938,7 +7061,7 @@ function enterPlanet(planet) {
   playerZoom = SURFACE_PLAYER_ZOOM;
   game.surface = {
     planet,
-    pickups: createPlanetPickups(planet),
+    pickups: createPlanetPickups(planet, { x: shipX, y: shipY }),
     x: shipX,
     y: shipY,
     facing: 'down',
@@ -8611,15 +8734,17 @@ function restoreGameState(savedState) {
   const legacySurfaceY = savedState.surface.y * game.height;
   const shipX = SURFACE_WORLD_SIZE * 0.58125;
   const shipY = SURFACE_WORLD_SIZE * 0.6;
+  const surfaceX = hasExpandedSurfaceCoordinates
+    ? wrapSurfaceCoordinate(savedState.surface.x * SURFACE_WORLD_SIZE)
+    : wrapSurfaceCoordinate(shipX + legacySurfaceX - game.width * 0.58125);
+  const surfaceY = hasExpandedSurfaceCoordinates
+    ? wrapSurfaceCoordinate(savedState.surface.y * SURFACE_WORLD_SIZE)
+    : wrapSurfaceCoordinate(shipY + legacySurfaceY - game.height * 0.6);
   game.surface = {
     planet,
-    pickups: createPlanetPickups(planet),
-    x: hasExpandedSurfaceCoordinates
-      ? wrapSurfaceCoordinate(savedState.surface.x * SURFACE_WORLD_SIZE)
-      : wrapSurfaceCoordinate(shipX + legacySurfaceX - game.width * 0.58125),
-    y: hasExpandedSurfaceCoordinates
-      ? wrapSurfaceCoordinate(savedState.surface.y * SURFACE_WORLD_SIZE)
-      : wrapSurfaceCoordinate(shipY + legacySurfaceY - game.height * 0.6),
+    pickups: createPlanetPickups(planet, { x: surfaceX, y: surfaceY }),
+    x: surfaceX,
+    y: surfaceY,
     facing: ['up', 'down', 'left', 'right'].includes(savedState.surface.facing)
       ? savedState.surface.facing
       : 'down',
@@ -10105,11 +10230,9 @@ function update(dt) {
       if (hitMountain || hitTarget || projectile.remainingDistance <= 0) game.surfaceProjectiles.splice(index, 1);
     }
     const reloadingGun = game.player.regolitoGunReloadUntil > game.time;
-    if (!multiplayerReady || !multiplayerWorldOwnerId || multiplayerIsWorldOwner) {
-      updateEarthWanderer(dt);
-      updateMartianNpcs(dt);
-      updateMartianEnemies(dt);
-    }
+    updateEarthWanderer(dt);
+    updateMartianNpcs(dt);
+    updateMartianEnemies(dt);
     updateSurfaceHoverboard();
     const hoverboardEquipped = game.player.hoverboardEquipped;
     const invokingHoverboard = (game.surface.hoverboard?.spawnUntil ?? 0) > game.time;
