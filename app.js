@@ -151,6 +151,7 @@ const PLANET_PICKUP_REGION_CHUNKS = 10;
 const PLANET_PICKUP_REGION_RADIUS_CHUNKS = 8;
 const MARTIAN_ENEMY_ACTIVE_RADIUS_CHUNKS = 8;
 const MARTIAN_ENEMY_HOVERBOARD_SPAWN_RADIUS_CHUNKS = 4;
+const MARTIAN_ENEMY_SYNC_GRACE_SECONDS = 10;
 let multiplayerSpaceOwnerId = '';
 let multiplayerIsSpaceOwner = false;
 let multiplayerEarthWandererTarget = null;
@@ -1700,7 +1701,9 @@ function applySharedSurfaceWorld(dt, blend) {
   if (isMars(game.surface.planet) || isLuna(game.surface.planet)) {
     const targets = multiplayerMartianEnemyTargets ?? [];
     const currentEnemies = new Map(game.martianEnemies.map((enemy) => [enemy.id, enemy]));
-    game.martianEnemies = targets.filter((target) => target.hp > 0).map((target) => {
+    const activeTargets = targets.filter((target) => target.hp > 0);
+    const targetIds = new Set(activeTargets.map((target) => target.id));
+    const synchronizedEnemies = activeTargets.map((target) => {
       const enemy = currentEnemies.get(target.id) ?? {
         id: target.id,
         type: target.type,
@@ -1717,6 +1720,7 @@ function applySharedSurfaceWorld(dt, blend) {
         animationFrame: target.animationFrame,
         shotUntil: 0,
       };
+      enemy.multiplayerPendingUntil = 0;
       enemy.multiplayerSimulatedHere = target.simulateHere === true;
       enemy.type = target.type;
       enemy.planetName = game.surface.planet.name;
@@ -1733,7 +1737,12 @@ function applySharedSurfaceWorld(dt, blend) {
       enemy.multiplayerTargetY = target.y * SURFACE_WORLD_SIZE;
       return enemy;
     });
-    for (const enemy of game.martianEnemies) {
+    const pendingEnemies = [...currentEnemies.values()].filter((enemy) =>
+      enemy.multiplayerPendingUntil > game.time &&
+      !targetIds.has(enemy.id)
+    );
+    game.martianEnemies = [...synchronizedEnemies, ...pendingEnemies];
+    for (const enemy of synchronizedEnemies) {
       enemy.x = wrapSurfaceCoordinate(
         enemy.x + getSurfaceAxisDelta(enemy.multiplayerTargetX, enemy.x) * blend
       );
@@ -2161,6 +2170,9 @@ function spawnMartianEnemy(distanceTiles = null, type = 'martian', preferredDire
     runSpeedMultiplier: lunatic ? 2 : 1,
     x: point.x,
     y: point.y,
+    multiplayerPendingUntil: multiplayerReady
+      ? game.time + MARTIAN_ENEMY_SYNC_GRACE_SECONDS
+      : 0,
     hp: MARTIAN_ENEMY_MAX_HEALTH,
     maxHp: MARTIAN_ENEMY_MAX_HEALTH,
     ammo: 6,
