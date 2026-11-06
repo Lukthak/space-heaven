@@ -162,6 +162,8 @@ let lastGameSaveAt = 0;
 let remoteSavePending = null;
 let remoteSaveTimer = null;
 let remoteSaveInFlight = false;
+let remoteSaveFlushPromise = null;
+let remoteSaveImmediatePending = false;
 let lastRemoteSaveAt = 0;
 let draggedInventoryItem = null;
 let draggedItemDroppedInsideInterface = false;
@@ -826,7 +828,7 @@ function sendChatMessage(text) {
     earthMissionStatus = 'available';
     earthMissionKillProgress = 0;
     updateHud();
-    saveGameState();
+    saveGameState(true);
     showPlayerChatMessage('/mision');
     setMessage(`Misión completada. Recibiste ${missionReward} créditos.`);
     chatInput.value = '';
@@ -876,7 +878,7 @@ function sendChatMessage(text) {
     setMessage('Recibiste 5.000 créditos.');
     chatInput.value = '';
     closeChatComposer();
-    saveGameState();
+    saveGameState(true);
     return;
   }
   if (/^\/enemy(?:\s|$)/i.test(message)) {
@@ -1286,6 +1288,14 @@ authForm.addEventListener('submit', async (event) => {
 
 async function logout() {
   if (!authReady || !authToken) return;
+  saveGameState(true);
+  while (remoteSavePending || remoteSaveInFlight) {
+    if (!await flushRemoteGameSave()) {
+      pauseMenuNote.textContent = 'No se pudo guardar la partida. Inténtalo otra vez antes de cerrar sesión.';
+      pauseMenuNote.hidden = false;
+      return;
+    }
+  }
   const token = authToken;
   authReady = false;
   authToken = '';
@@ -5351,7 +5361,7 @@ function startEmergencyService(type) {
   };
   updateHud();
   updateEmergencyHelpPanel();
-  saveGameState();
+  saveGameState(true);
   setMessage(type === 'delivery'
     ? 'Combustible express solicitado. Una nave salió de Tierra.'
     : 'Remolque solicitado. Una nave de rescate salió de Tierra.');
@@ -7055,6 +7065,7 @@ function buyMarketItem(index) {
       updateInventoryItemsGrid();
       updateMarketPanel();
       updateHud();
+      saveGameState(true);
       return;
     }
   }
@@ -7062,7 +7073,7 @@ function buyMarketItem(index) {
   updateInventoryItemsGrid();
   updateMarketPanel();
   updateHud();
-  saveGameState();
+  saveGameState(true);
   marketStatus.textContent = `Compraste ${quantity} ${item.name.toLowerCase()} por ${item.price * quantity} créditos.`;
 }
 
@@ -7107,7 +7118,7 @@ function sellMarketItem(index) {
   updateInventoryItemsGrid();
   updateMarketPanel();
   updateHud();
-  saveGameState();
+  saveGameState(true);
   marketStatus.textContent = `Vendiste ${quantity} ${item.name.toLowerCase()} por ${earned} créditos.`;
 }
 
@@ -7293,7 +7304,7 @@ function talkToQuestGiver() {
       earthMissionStatus = 'available';
       earthMissionKillProgress = 0;
       updateHud();
-      saveGameState();
+      saveGameState(true);
       setMessage(`¡Misión completada! ${EARTH_MISSION_GIVER} te pagó ${rewardCredits} $. Ya tiene otro encargo: ${getEarthMissionDescription()} por ${earthMission.rewardCredits} $.`);
       return;
     }
@@ -7313,7 +7324,7 @@ function talkToQuestGiver() {
     earthMissionKillProgress = 0;
     updateInventoryItemsGrid();
     updateHud();
-    saveGameState();
+    saveGameState(true);
     setMessage(`¡Misión completada! ${EARTH_MISSION_GIVER} te pagó ${rewardCredits} $. Ya tiene otro encargo: ${getEarthMissionDescription()} por ${earthMission.rewardCredits} $.`);
     return;
   }
@@ -7419,7 +7430,7 @@ function repairShipParts(slots) {
   }
   updateShipStatsDisplay();
   updateHud();
-  saveGameState();
+  saveGameState(true);
   renderRepairPanel();
   repairStatus.textContent = `Piezas reparadas por ${totalCost} $.`;
 }
@@ -7876,44 +7887,64 @@ function scheduleRemoteGameSave(delay = 0) {
 }
 
 async function flushRemoteGameSave(keepalive = false) {
-  if (!remoteSavePending || remoteSaveInFlight || !authToken || !multiplayerEndpoint) return;
+  if (!remoteSavePending) return true;
+  if (!authToken || !multiplayerEndpoint) return false;
+  if (remoteSaveInFlight) {
+    if (keepalive) remoteSaveImmediatePending = true;
+    const saved = await remoteSaveFlushPromise;
+    if (saved && remoteSavePending && authToken) {
+      return flushRemoteGameSave(keepalive);
+    }
+    return saved;
+  }
   if (remoteSaveTimer !== null) {
     window.clearTimeout(remoteSaveTimer);
     remoteSaveTimer = null;
   }
   const serializedState = remoteSavePending;
   remoteSavePending = null;
+  remoteSaveImmediatePending = false;
   remoteSaveInFlight = true;
-  try {
-    const response = await fetch('/api/save', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer ' + authToken,
-      },
-      body: `{"state":${serializedState}}`,
-      cache: 'no-store',
-      keepalive,
-    });
-    if (!response.ok) {
-      const result = await response.json();
-      throw new Error(result.error || `HTTP ${response.status}`);
+  remoteSaveFlushPromise = (async () => {
+    try {
+      const response = await fetch('/api/save', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer ' + authToken,
+        },
+        body: `{"state":${serializedState}}`,
+        cache: 'no-store',
+        keepalive,
+      });
+      if (!response.ok) {
+        const result = await response.json();
+        throw new Error(result.error || `HTTP ${response.status}`);
+      }
+      lastRemoteSaveAt = Date.now();
+      return true;
+    } catch (error) {
+      console.error('No se pudo guardar la partida en el servidor:', error);
+      if (!remoteSavePending) remoteSavePending = serializedState;
+      return false;
     }
-    lastRemoteSaveAt = Date.now();
-  } catch (error) {
-    console.error('No se pudo guardar la partida en el servidor:', error);
-    if (!remoteSavePending) remoteSavePending = serializedState;
-  } finally {
-    remoteSaveInFlight = false;
-    if (remoteSavePending && authToken) {
-      scheduleRemoteGameSave(Math.max(1000, 5000 - (Date.now() - lastRemoteSaveAt)));
+  })();
+  const saved = await remoteSaveFlushPromise;
+  remoteSaveFlushPromise = null;
+  remoteSaveInFlight = false;
+  if (remoteSavePending && authToken) {
+    if (saved && remoteSaveImmediatePending) {
+      return flushRemoteGameSave(keepalive);
     }
+    scheduleRemoteGameSave(Math.max(1000, 5000 - (Date.now() - lastRemoteSaveAt)));
   }
+  return saved;
 }
 
 function queueRemoteGameSave(serializedState, immediate = false) {
   remoteSavePending = serializedState;
   if (immediate) {
+    remoteSaveImmediatePending = true;
     scheduleRemoteGameSave(0);
     return;
   }
