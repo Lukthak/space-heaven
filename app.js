@@ -1733,11 +1733,19 @@ function applySharedSurfaceWorld(dt, blend) {
         pathDirection: null,
       };
       enemy.multiplayerPendingUntil = 0;
+      enemy.multiplayerSimulatedHere = target.simulateHere === true;
       enemy.type = target.type;
       enemy.planetName = game.surface.planet.name;
       enemy.runSpeedMultiplier = target.type === 'lunatic' ? 2 : 1;
       enemy.hp = Math.min(enemy.hp, target.hp);
       enemy.maxHp = target.maxHp;
+      if (!enemy.multiplayerSimulatedHere) {
+        enemy.multiplayerTargetX = target.x * SURFACE_WORLD_SIZE;
+        enemy.multiplayerTargetY = target.y * SURFACE_WORLD_SIZE;
+        enemy.facing = target.facing;
+        enemy.isMoving = target.isMoving;
+        if (target.shooting) enemy.shotUntil = game.time + 0.12;
+      }
       return enemy;
     });
     const pendingEnemies = [...currentEnemies.values()].filter((enemy) =>
@@ -2164,6 +2172,7 @@ function spawnMartianEnemy(distanceTiles = null, type = 'martian', preferredDire
     runSpeedMultiplier: lunatic ? 2 : 1,
     x: point.x,
     y: point.y,
+    multiplayerSimulatedHere: true,
     multiplayerPendingUntil: multiplayerReady
       ? game.time + MARTIAN_ENEMY_SYNC_GRACE_SECONDS
       : 0,
@@ -2690,7 +2699,29 @@ function updateMartianEnemies(dt) {
       game.martianEnemies.splice(index, 1);
       continue;
     }
-    updateMartianEnemy(enemy, dt);
+    if (!multiplayerReady || enemy.multiplayerSimulatedHere) {
+      updateMartianEnemy(enemy, dt);
+    } else {
+      if (Number.isFinite(enemy.multiplayerTargetX) && Number.isFinite(enemy.multiplayerTargetY)) {
+        const blend = 1 - Math.exp(-18 * dt);
+        enemy.x = wrapSurfaceCoordinate(
+          enemy.x + getSurfaceAxisDelta(enemy.multiplayerTargetX, enemy.x) * blend
+        );
+        enemy.y = wrapSurfaceCoordinate(
+          enemy.y + getSurfaceAxisDelta(enemy.multiplayerTargetY, enemy.y) * blend
+        );
+      }
+      if (enemy.isMoving) {
+        enemy.animationTimer += dt;
+        while (enemy.animationTimer >= PLAYER_ANIMATION_FRAME_DURATION) {
+          enemy.animationTimer -= PLAYER_ANIMATION_FRAME_DURATION;
+          enemy.animationFrame = (enemy.animationFrame + 1) % 4;
+        }
+      } else {
+        enemy.animationFrame = 1;
+        enemy.animationTimer = 0;
+      }
+    }
   }
 }
 

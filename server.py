@@ -25,6 +25,8 @@ WORLD_SAVE_INTERVAL_SECONDS = 1
 MAX_SHARED_PLANET_PICKUPS = 10_000
 MAX_SHARED_MARTIAN_ENEMIES = 100
 PICKUP_VISIBILITY_RADIUS = 0.12
+MARTIAN_ENEMY_SIMULATION_RADIUS = 0.08
+MARTIAN_ENEMY_SIMULATOR_TTL_SECONDS = 2
 STATE_LOCK = threading.RLock()
 PLAYERS: dict[str, dict] = {}
 WORLDS: dict[str, dict] = {}
@@ -416,7 +418,31 @@ def sanitize_martian_enemy(enemy: object) -> dict | None:
     }
 
 
-def public_world(world: dict, snapshot: dict | None = None) -> dict:
+def is_enemy_simulator_active(enemy: dict, planet: str, simulator_id: str) -> bool:
+    simulator = PLAYERS.get(simulator_id)
+    snapshot = simulator.get("snapshot", {}) if simulator else {}
+    if (
+        not simulator
+        or time.time() - simulator.get("seen_at", 0) > MARTIAN_ENEMY_SIMULATOR_TTL_SECONDS
+        or snapshot.get("scene") != "surface"
+        or str(snapshot.get("planet", "")).strip().lower() != planet
+    ):
+        return False
+    center_x = snapshot.get("surfaceX")
+    center_y = snapshot.get("surfaceY")
+    if any(
+        not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        for value in (center_x, center_y)
+    ):
+        return False
+    delta_x = abs((enemy["x"] % 1) - (center_x % 1))
+    delta_y = abs((enemy["y"] % 1) - (center_y % 1))
+    return math.hypot(min(delta_x, 1 - delta_x), min(delta_y, 1 - delta_y)) <= MARTIAN_ENEMY_SIMULATION_RADIUS
+
+
+def public_world(world: dict, snapshot: dict | None = None, player_id: str = "") -> dict:
     public = {key: value for key, value in world.items() if not key.startswith("_")}
     pickups = sanitize_shared_pickups(world.get("pickups", []))
     revision = world.get("_pickupRevision", 0)
@@ -445,8 +471,17 @@ def public_world(world: dict, snapshot: dict | None = None) -> dict:
     )
     public["pickups"] = [pickup for pickup in pickups if is_nearby(pickup)]
     enemies = world.get("_martianEnemies", {})
+    planet = str(world.get("planet", "")).strip().lower()
     public["martianEnemies"] = [
-        {key: value for key, value in enemy.items() if not key.startswith("_")}
+        {
+            **{key: value for key, value in enemy.items() if not key.startswith("_")},
+            "simulateHere": (
+                enemy.get("_simulatorId") == player_id
+                or not is_enemy_simulator_active(
+                    enemy, planet, str(enemy.get("_simulatorId", ""))
+                )
+            ),
+        }
         for enemy in enemies.values()
         if isinstance(enemies, dict) and isinstance(enemy, dict) and enemy.get("hp", 0) > 0 and is_nearby(enemy)
     ][:MAX_SHARED_MARTIAN_ENEMIES] if isinstance(enemies, dict) else []
@@ -921,7 +956,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
             result = {
                 "players": players,
                 "worlds": {
-                    planet: public_world(WORLDS[planet], self_snapshot)
+                    planet: public_world(WORLDS[planet], self_snapshot, self_id)
                 } if planet in WORLDS else {},
                 "spaceWorld": public_space_world(),
                 "balance": public_balance(),
@@ -1150,6 +1185,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                         if clean_enemy:
                             enemy_states[clean_enemy["id"]] = {
                                 **clean_enemy,
+                                "_simulatorId": "",
                                 "_updatedAt": now,
                             }
                 incoming_deaths = surface_world.get("deadMartianEnemyIds", [])
@@ -1177,14 +1213,23 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                             if enemy["hp"] > 0:
                                 enemy_states[enemy_id] = {
                                     **enemy,
+                                    "_simulatorId": player_id,
                                     "_updatedAt": now,
                                 }
                             continue
 
-                        previous_enemy.pop("_simulatorId", None)
                         previous_enemy["hp"] = min(previous_enemy.get("hp", enemy["hp"]), enemy["hp"])
-                        previous_enemy["_updatedAt"] = now
-                        if previous_enemy["hp"] <= 0:
+                        simulator_id = str(previous_enemy.get("_simulatorId", ""))
+                        if simulator_id == player_id or not is_enemy_simulator_active(
+                            previous_enemy, planet, simulator_id
+                        ):
+                            enemy_states[enemy_id] = {
+                                **enemy,
+                                "hp": previous_enemy["hp"],
+                                "_simulatorId": player_id,
+                                "_updatedAt": now,
+                            }
+                        if enemy_states.get(enemy_id, {}).get("hp", 0) <= 0:
                             enemy_states.pop(enemy_id, None)
                             if enemy_id not in dead_enemy_set:
                                 dead_enemy_ids.append(enemy_id)
@@ -1212,7 +1257,7 @@ class SpaceHeavenHandler(SimpleHTTPRequestHandler):
                 save_shared_worlds(now)
 
             visible_worlds = {
-                planet: public_world(WORLDS[planet], snapshot)
+                planet: public_world(WORLDS[planet], snapshot, player_id)
             } if planet in WORLDS else {}
             result = {
                 "ok": True,
